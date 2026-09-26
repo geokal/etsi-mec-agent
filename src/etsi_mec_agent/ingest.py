@@ -234,6 +234,19 @@ def ingest_pdfs(
     # Dry-run: skip model loading entirely — nothing gets embedded or written.
     dense_model, colbert_model = (None, None) if dry_run else get_embedders()
 
+    if recreate_index:
+        # A wipe empties the collection, so --skip-existing would skip nothing;
+        # normalize the flag so the per-doc scroll check can't fire against the pre-wipe data.
+        if skip_existing:
+            print("[INFO] --recreate-index wipes the collection first, so --skip-existing has nothing to skip.", flush=True)
+        skip_existing = False
+    if dry_run and recreate_index:
+        try:
+            points = client.get_collection(settings.qdrant_index).points_count
+            print(f"[DRY-RUN] A real run would DELETE '{settings.qdrant_index}' ({points} points) before re-ingesting.", flush=True)
+        except Exception:
+            print(f"[DRY-RUN] A real run would DELETE '{settings.qdrant_index}' (if present) before re-ingesting.", flush=True)
+
     total_chunks = 0
     total_start = time.time()
 
@@ -283,7 +296,7 @@ def main():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Parse and chunk only: report what would be indexed, write nothing to Qdrant",
+        help="Parse and chunk only: report what would be indexed (honors --skip-existing), write nothing to Qdrant",
     )
 
     args = parser.parse_args()
