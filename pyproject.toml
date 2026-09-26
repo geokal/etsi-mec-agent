@@ -1,0 +1,35 @@
+[project]
+name = "etsi-mec-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "geokal", email = "kalpgiorgos@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "exa-py>=2.22.2",
+    "fastembed-haystack>=2.7.0",
+    "haystack-ai>=3.2.0",
+    "matplotlib>=3.11.2",
+    "networkx>=3.7",
+    "numpy>=2.5.3",
+    "onnxruntime>=1.30.0",
+    "openai>=3.19.2",
+    "pandas>=3.0.6",
+    "pillow>=12.3.0",
+    "pymupdf4llm>=1.28.2",
+    "pypdf>=6.19.0",
+    "python-dotenv>=1.2.3",
+    "qdrant-haystack>=10.6.0",
+    "sentence-transformers>=6.1.0",
+    "transformers>=5.17.0",
+    "umap-learn>=0.5.12",
+]
+
+[project.scripts]
+etsi-mec-agent = "etsi_mec_agent:main"
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
