@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "serena": {
+      "command": "serena",
+      "args": [
+        "start-mcp-server",
+        "--context",
+        "agent",
+        "--project-from-cwd"
+      ],
+      "env": {}
+    }
+  }
+}
