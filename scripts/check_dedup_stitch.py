@@ -45,3 +45,30 @@ assert _stitch("x", "") == "x"
 
 print("[check] _stitch: ingest 40-word round-trip, trim, concat, degenerate tail,")
 print("[check]         single-token kept, empty input; SimpleDoc attr contract — OK")
+
+from etsi_mec_agent.dedup import _dedup_docs
+
+
+def _docs(specs):
+    """specs: list of (doc_id, text) -> SimpleDoc list"""
+    return [SimpleDoc(t, {"doc_id": d}) for d, t in specs]
+
+
+# Baseline behaviour must not change: one excerpt per doc_id, capped at keep.
+one = _dedup_docs(_docs([("MEC003", "aa bb cc"), ("MEC003", "dd ee ff"), ("MEC030", "gg")]), keep=5)
+assert [d.meta["doc_id"] for d in one] == ["MEC003", "MEC030"], one
+
+# per_doc=2 keeps the continuation of the same document.
+two = _dedup_docs(_docs([("MEC003", "aa bb"), ("MEC003", "dd ee"), ("MEC003", "ff gg"),
+                         ("MEC030", "hh ii")]), keep=5, per_doc=2)
+assert [d.meta["doc_id"] for d in two] == ["MEC003", "MEC003", "MEC030"], two
+
+# keep still wins over per_doc.
+capped = _dedup_docs(_docs([("MEC003", "aa"), ("MEC003", "bb"), ("MEC003", "cc")]), keep=2, per_doc=2)
+assert len(capped) == 2, capped
+
+# Identical text under two doc_ids collapses (this is what hides the mislabelled copies).
+same = _dedup_docs(_docs([("MEC003", "xx yy zz"), ("MEC070", "xx yy zz")]), keep=5)
+assert len(same) == 1, same
+
+print("[check] _dedup_docs: default, per_doc, keep cap, cross-id text collapse — OK")
