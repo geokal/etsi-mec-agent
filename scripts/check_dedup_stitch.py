@@ -164,5 +164,29 @@ assert len(rebuilt) == 1, len(rebuilt)
 assert rebuilt[0].content.split() == pw700, "3-part page not reconstructed exactly"
 assert rebuilt[0].meta["stitched_parts"] == 3, rebuilt[0].meta
 
-print("[check] _stitch_parts: merge, gap, page & doc_id in the key, passthrough,")
-print("[check]               reversed order, 700-word round-trip — OK")
+# The headline promise in the docstring: parts of one page still merge when an unrelated
+# excerpt sits between them. The interloper carries part metadata on purpose — with
+# total_parts=1 it would take the passthrough branch, never touch run tracking, and this
+# assert would pass for the wrong reason.
+inter = _stitch_parts([_parts("MEC003", 16, 1, 2, "|Mm7:|The Mm7 reference point"),
+                       _parts("MEC070", 16, 1, 2, "unrelated other spec text"),
+                       _parts("MEC003", 16, 2, 2, "reference point between the VIM")])
+assert len(inter) == 2, inter
+assert inter[0].meta["stitched_parts"] == 2, inter[0].meta
+assert inter[0].content.split() == "|Mm7:|The Mm7 reference point between the VIM".split(), inter[0].content
+
+# "a new run may start at part 3": a run opening mid-page still merges 2+3, which is what
+# lets a merged excerpt begin mid-page without ever inventing a middle.
+mid_run = _stitch_parts([_parts("MEC003", 16, 2, 3, "bbb ccc"), _parts("MEC003", 16, 3, 3, "ccc ddd")])
+assert len(mid_run) == 1 and mid_run[0].meta["stitched_parts"] == 2, mid_run
+
+# Passthrough returns the caller's own objects and leaves their payloads alone. SimpleDoc
+# is frozen and compares by value, so the `==` asserts above would also accept a rebuilt
+# copy; identity and the un-added key are what pin that.
+ident = _stitch_parts([solo, legacy])
+assert ident[0] is solo and ident[1] is legacy, ident
+assert "stitched_parts" not in p1.meta, p1.meta
+
+print("[check] _stitch_parts: merge, gap, page & doc_id in the key, passthrough identity,")
+print("[check]               reversed order, mid-page run start, interleaved parts,")
+print("[check]               700-word round-trip — OK")

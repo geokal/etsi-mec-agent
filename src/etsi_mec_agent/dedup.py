@@ -98,8 +98,9 @@ def _stitch_parts(docs: list) -> list:
     retrieved; a new run may start at part 3, so a merged excerpt can begin mid-page
     but never invents a middle.
 
-    Points with no usable part metadata, and whole pages (total_parts <= 1), pass
-    through as the caller's own object; merged runs come back as SimpleDoc, so the
+    A run that ends up holding one excerpt passes through as the caller's own object:
+    points with no usable part metadata, whole pages (total_parts <= 1), and a part whose
+    siblings were simply never retrieved. Merged runs come back as SimpleDoc, so the
     returned list mixes both types — a consumer that reads a wrapper attribute
     (search.py's `_HitDoc._hit`) must handle that.
     """
@@ -124,8 +125,10 @@ def _stitch_parts(docs: list) -> list:
 
     out = []
     for run in runs:
-        # Not a fast path: it is the only thing that keeps a single-part excerpt from being
-        # re-tokenized through _stitch, which flattens raw markdown newlines.
+        # Not a fast path, and not for the reason it looks like: _stitch only ever sees a
+        # run's 2nd+ part, so dropping this branch would NOT flatten single-part text. What
+        # it really costs is the caller's object identity plus a stitched_parts: 1 key on a
+        # one-part excerpt — the two things scripts/check_dedup_stitch.py pins by identity.
         if len(run) == 1:
             out.append(run[0])
             continue
