@@ -40,31 +40,41 @@ def _dedup_docs(docs: list, keep: int, per_doc: int = 1) -> list:
     """
     Two-pass deduplication of retrieved hits.
 
-    Pass 1 — text fingerprint (first 400 chars, images stripped): catches the same
-    chunk stored under different doc_ids, which is common in this corpus because each
-    PDF extraction embeds a different image path in the markdown.
+    Pass 1 — text fingerprint: markdown images are stripped from the content first and
+    the first 400 chars of what remains are compared, in that order, which is why an
+    image path inside the window cannot break a match. This catches the same chunk
+    stored under different doc_ids, which is common in this corpus because each PDF
+    extraction embeds a different image path in the markdown.
 
-    Pass 2 — up to `per_doc` excerpts per doc_id, `keep` results overall. per_doc=1
+    Pass 2 — up to `per_doc` excerpts per doc_id, `keep` results overall. A hit with no
+    doc_id is bucketed by the first 40 chars of its text instead, so two different
+    documents sharing such a prefix consume one `per_doc` quota together. per_doc=1
     reproduces the historical one-chunk-per-document rule; larger values let a
     document contribute more than its single best-ranked page.
     """
-    seen_text: set = set()
-    after_text: list = []
+    # per_doc <= 0 would drop every excerpt (the per-doc count starts at 0 and is
+    # already >= it); clamp here rather than in argparse at all three call sites.
+    per_doc = max(1, per_doc)
+    seen_text = set()
+    after_text = []
     for doc in docs:
-        raw = doc.content if hasattr(doc, "content") else (doc.meta or {}).get("text", "")
-        fp = _IMG_RE.sub("", raw or "")[:400].strip()
+        raw = doc.content or ""
+        fp = _IMG_RE.sub("", raw)[:400].strip()
         if fp not in seen_text:
             seen_text.add(fp)
             after_text.append(doc)
 
-    counts: dict = {}
-    unique: list = []
+    # ponytail: pass 1 runs first, so an excerpt it dropped is gone before per_doc is
+    # consulted; per_doc cannot rescue it. Upgrade path: run pass 2 before pass 1.
+    counts = {}
+    unique = []
     for doc in after_text:
         meta = doc.meta if hasattr(doc, "meta") else {}
         doc_id = (meta or {}).get("doc_id", "") or (doc.content or "")[:40]
-        if counts.get(doc_id, 0) >= per_doc:
+        n = counts.get(doc_id, 0)
+        if n >= per_doc:
             continue
-        counts[doc_id] = counts.get(doc_id, 0) + 1
+        counts[doc_id] = n + 1
         unique.append(doc)
         if len(unique) >= keep:
             break
