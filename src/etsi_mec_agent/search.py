@@ -238,8 +238,10 @@ def search_specs(
     # candidates to fill the evidence budget after stitching and dedup.
     fetch_k = max(top_k, answer_context) if generate else top_k
     # The dense prefetch is the rerank pool and therefore the ceiling on how many excerpts
-    # ColBERT can rescore: a bigger evidence budget needs a bigger pool.
-    prefetch_limit = max(prefetch_limit, fetch_k)
+    # ColBERT can rescore: a bigger evidence budget needs a bigger pool. The budget is 15
+    # excerpts while the display is 5, and _stitch_parts can only merge parts that were
+    # retrieved at all, so the pool must be 3x the evidence budget rather than its width.
+    prefetch_limit = max(prefetch_limit, fetch_k * 3)
     dense_model, colbert_model = get_embedders()
 
     t0 = time.time()
@@ -299,7 +301,8 @@ def search_specs(
 
         if generate:
             print(f"[ANSWER CONTEXT] {len(answer_docs)} excerpts, up to {per_doc} per document "
-                  f"(~{sum(len(d.content.split()) for d in answer_docs)} words).")
+                  f"(~{sum(len(d.content.split()) for d in answer_docs)} words), "
+                  f"{sum(1 for d in stitched if (d.meta or {}).get('stitched_parts', 1) > 1)} page-part group(s) merged.")
             generate_answer(query_text, answer_docs, stream=stream, show_reasoning=show_reasoning)
         return unique_docs
 
@@ -371,7 +374,8 @@ def search_specs(
     # ------------------------------------------------------------------
     if generate:
         print(f"[ANSWER CONTEXT] {len(answer_docs)} excerpts, up to {per_doc} per document "
-              f"(~{sum(len(d.content.split()) for d in answer_docs)} words).")
+              f"(~{sum(len(d.content.split()) for d in answer_docs)} words), "
+              f"{sum(1 for d in hit_docs if (d.meta or {}).get('stitched_parts', 1) > 1)} page-part group(s) merged.")
         generate_answer(query_text, answer_docs, stream=stream, show_reasoning=show_reasoning)
 
     return deduped
