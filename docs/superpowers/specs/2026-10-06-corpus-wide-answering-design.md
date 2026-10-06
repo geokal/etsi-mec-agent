@@ -162,6 +162,36 @@ the one distinguishing row is outvoted by three differently-worded copies. This 
 dedupe by content, one `is_current` edition per `spec_id`) showing up as a wrong answer rather than as
 a low recall number.
 
+## 5d. Result after B1 identity stamping, measured 2026-10-06
+
+Same command, same 16 questions, on the collection `scripts/backfill_spec_identity.py` stamped
+(4669 chunks: 3481 `is_current=true`, 1188 superseded) and `search.py::build_filter` now filters by
+default, with `_dedup_docs` spending the per-doc quota per `content_md5`:
+
+`recall@5: colbert=11/16 (69%)  hybrid=11/16 (69%)  aggregate@15: 12/16 (75%)`, every question
+reporting `evidence ok`.
+
+Against §5b that is colbert 10→11, hybrid 10→11, aggregate 11→12, while 1188 chunks became
+unreachable and another 957 collapse into a shared quota — recall rose because the duplicates and
+stale editions stopped outvoting the discriminating row. Union coverage went 12/16 → 14/16: only q08
+and q14 are missed by all three paths.
+
+- **q06 moved MISS/MISS → aggregate @2.** Rewritten around `Nnef_TrafficInfluence` (the "TCR" it
+  asked about occurs in no chunk of the corpus), it is the one question A's acceptance bar named and
+  the stitch mechanism is what surfaced it.
+- **q12 moved the other way:** rewritten around "selects the MEC host", a phrase in 2 chunks, it is
+  colbert @3 and MISS on both hybrid paths.
+- **q08 and q14 stay MISS everywhere, and they are now genuinely retrieval failures:** their keywords
+  sit in current MEC-003 V4.1.1 (`LCM proxy` in 5 current chunks, `service registration` in 18,
+  `service discovery` in 27). This is B2 row/clause chunking, not golden data and not a wider `k`.
+- **A's bar is still not met:** the criterion was two of q06/q08/q12/q14 converting, and only q06 did.
+
+The end-to-end proof changed character, though. The same Mm3/Mm5 question that produced "Mm5, because
+the MEC orchestrator is referred to as the MEC Platform Manager" now answers **Mm3**, cites it to
+GS MEC 010-2 V4.1.1 with the table quoted whole, and distinguishes it from Mp1. The corpus holds no
+reference point between the MEC platform and the orchestrator, so naming the manager-mediated path is
+the best answer available — and it is attributed to the spec the text really comes from.
+
 ---
 
 ## 6. Out of scope here
