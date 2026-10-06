@@ -18,7 +18,7 @@ def search_local_etsi_specs(query: str, diagrams_only: bool = False) -> str:
         doc = payload.get("filename") or payload.get("doc_id")
         page = payload.get("page")
         heading = payload.get("heading", "")
-        text = payload.get("text", "")
+        text = h.content or ""
         diagrams = payload.get("diagram_paths", [])
 
         output_lines.append(f"\n[Result {i}] Document: {doc} | Page: {page}")
