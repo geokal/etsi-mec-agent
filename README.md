@@ -223,8 +223,9 @@ uv run python scripts/eval_rag.py --top-k 5
 ```
 Prints the rank at which each golden question is answered under both retrieval paths, plus the
 `aggregate` column — the same hybrid path shaped like the `--answer` evidence budget (stitched
-parts, `--per-doc` excerpts per doc) and measured over 3×`--top-k` — and reports recall@k next to
-the aggregate recall.
+parts, up to `--per-doc` excerpts per doc, read over `--answer-context`, defaults 2 and 15).
+Recall is reported for the two baseline paths at `--top-k` and for the aggregate column over that
+budget.
 A question flagged `EVIDENCE-MISSING` is bad golden data — its keyword does not occur in the
 expected document — and is excluded from the denominator, so recall reflects retrieval only.
 

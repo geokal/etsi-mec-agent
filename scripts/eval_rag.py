@@ -1,13 +1,13 @@
 """Golden-question retrieval eval for the ETSI MEC pipeline.
 
-    uv run python scripts/eval_rag.py [--top-k 5]
+    uv run python scripts/eval_rag.py [--top-k 5] [--answer-context 15] [--per-doc 2]
 
 Exercises three retrieval paths from etsi_mec_agent.search:
   colbert   — dense prefetch + ColBERT MaxSim rescore (search_specs path 2)
   hybrid    — Qdrant server-side dense+sparse prefetch with RRF fusion (_run_hybrid_retrieval)
-  aggregate — what --answer reads: the hybrid path with contiguous page parts stitched first
-              and up to --per-doc excerpts per doc, over a window 3x --top-k. That column
-              measures the LLM's evidence budget, not the --top-k the terminal prints.
+  aggregate — what --answer reads: the hybrid path with contiguous page parts stitched first,
+              measured over the same --answer-context / --per-doc budget the CLI uses
+              (defaults 15 / 2). This column is the LLM's evidence, not the --top-k printed.
 
 A question passes when a top-k chunk from the expected document contains
 one of its expected keywords. Questions whose keywords exist nowhere in
@@ -107,7 +107,14 @@ def first_hit_rank(hits, q, k):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--top-k", type=int, default=5)
-    k = ap.parse_args().top_k
+    ap.add_argument("--answer-context", type=int, default=15,
+                    help="Evidence budget the aggregate column measures (mirrors search --answer-context)")
+    ap.add_argument("--per-doc", type=int, default=2,
+                    help="Excerpts per document in the aggregate column (mirrors search --per-doc)")
+    args = ap.parse_args()
+    if args.answer_context < 1 or args.per_doc < 1:
+        ap.error("--answer-context and --per-doc must be >= 1")
+    k, window, per_doc = args.top_k, args.answer_context, args.per_doc
 
     client = get_qdrant_client()
     corpus = load_corpus(client)
@@ -115,7 +122,6 @@ def main():
 
     modes = {"colbert": [], "hybrid": []}
     agg = []
-    window = k * 3  # --top-k 5 -> agg@15, the default --answer-context
     print(f"{'id':4} {'evidence':9} {'colbert':8} {'hybrid':8} {'aggregate':10} query")
     for q in QUESTIONS:
         if not evidence_ok(q, corpus):
@@ -126,7 +132,7 @@ def main():
 
         r_c = first_hit_rank(hits_colbert(client, q_dense, q_colbert, k), q, k)
         r_h = first_hit_rank(hits_hybrid(client, q["query"], q_dense, k), q, k)
-        r_a = first_hit_rank(hits_aggregate(client, q["query"], q_dense, ctx=window), q, window)
+        r_a = first_hit_rank(hits_aggregate(client, q["query"], q_dense, ctx=window, per_doc=per_doc), q, window)
         modes["colbert"].append(r_c is not None)
         modes["hybrid"].append(r_h is not None)
         agg.append(r_a is not None)
