@@ -56,8 +56,8 @@ def _run_hybrid_retrieval(
     the sparse vector, so rarity is computed corpus-wide instead of the
     old per-candidate approximation.
 
-    Returns top_k simple namespace objects with .content and .meta for
-    compatibility with generate_answer().
+    Returns up to top_k SimpleDocs — .content is the stored payload text, .meta is the
+    payload — the shape generate_answer() and _dedup_docs read.
     """
     results = client.query_points(
         collection_name=settings.qdrant_index,
