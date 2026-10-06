@@ -20,7 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from qdrant_client import models
 
 from etsi_mec_agent.config import settings
-from etsi_mec_agent.search import _dedup_docs, _run_hybrid_retrieval, get_embedders
+from etsi_mec_agent.dedup import _dedup_docs
+from etsi_mec_agent.search import _run_hybrid_retrieval, get_embedders
 from etsi_mec_agent.store import get_qdrant_client
 
 # doc=None means any document may satisfy the question.

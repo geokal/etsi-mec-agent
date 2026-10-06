@@ -7,6 +7,7 @@ from fastembed import LateInteractionTextEmbedding, TextEmbedding
 from qdrant_client import models
 
 from etsi_mec_agent.config import settings
+from etsi_mec_agent.dedup import SimpleDoc, _dedup_docs
 from etsi_mec_agent.store import get_qdrant_client
 
 
@@ -80,54 +81,6 @@ def _run_hybrid_retrieval(
             self.meta = meta
 
     return [_Doc(h.payload.get("text", ""), h.payload) for h in results.points]
-
-
-
-# ---------------------------------------------------------------------------
-# Deduplication helper shared by both search paths
-# ---------------------------------------------------------------------------
-
-_IMG_RE = _re.compile(r'!\[.*?\]\(.*?\)')   # strip markdown image refs before fingerprinting
-
-
-def _dedup_docs(docs: list, keep: int) -> list:
-    """
-    Two-pass deduplication:
-
-    Pass 1 — text fingerprint (first 400 chars, images stripped):
-        Catches the same chunk stored under different doc_ids because
-        each PDF extraction embeds a different image path in the markdown,
-        making a naive first-300-chars fingerprint fail.
-
-    Pass 2 — doc_id uniqueness (keep best chunk per document):
-        Prevents the same spec from dominating all result slots.
-        Within each doc_id we keep the first (highest-ranked) chunk.
-
-    Returns at most `keep` results.
-    """
-    # Pass 1 — text fingerprint
-    seen_text: set = set()
-    after_text: list = []
-    for doc in docs:
-        raw = doc.content if hasattr(doc, "content") else (doc.meta or {}).get("text", "")
-        fp = _IMG_RE.sub("", raw or "")[:400].strip()
-        if fp not in seen_text:
-            seen_text.add(fp)
-            after_text.append(doc)
-
-    # Pass 2 — one chunk per doc_id
-    seen_doc: set = set()
-    unique: list = []
-    for doc in after_text:
-        meta = doc.meta if hasattr(doc, "meta") else {}
-        doc_id = (meta or {}).get("doc_id", "") or (doc.content or "")[:40]
-        if doc_id not in seen_doc:
-            seen_doc.add(doc_id)
-            unique.append(doc)
-        if len(unique) >= keep:
-            break
-
-    return unique
 
 
 # ---------------------------------------------------------------------------
