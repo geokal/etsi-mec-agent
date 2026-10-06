@@ -86,3 +86,43 @@ def _dedup_docs(docs: list, keep: int, per_doc: int = 1) -> list:
             break
 
     return unique
+
+
+def _stitch_parts(docs: list) -> list:
+    """
+    Merge runs of contiguous `chunk_part`s sharing a doc_id+page into one excerpt.
+
+    Retrieval returns parts in score order, so a page split into 1 of 2 / 2 of 2 only
+    merges when the two halves both arrived and sit next to each other in that order.
+    Non-contiguous or reversed parts stay separate rather than fabricating a page.
+    Points without usable part metadata pass through unchanged.
+    """
+    groups: list = []
+    open_group: dict = {}          # (doc_id, page) -> index of the run still accepting parts
+
+    for doc in docs:
+        meta = doc.meta or {}
+        part, total = meta.get("chunk_part"), meta.get("total_parts")
+        if not isinstance(part, int) or not isinstance(total, int) or total <= 1:
+            groups.append([doc])
+            continue
+        key = (meta.get("doc_id", ""), meta.get("page"))
+        idx = open_group.get(key)
+        if idx is not None and groups[idx][-1].meta["chunk_part"] + 1 == part:
+            groups[idx].append(doc)
+        else:
+            open_group[key] = len(groups)
+            groups.append([doc])
+
+    out = []
+    for group in groups:
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        text = group[0].content
+        for nxt in group[1:]:
+            text = _stitch(text, nxt.content)
+        meta = dict(group[0].meta)
+        meta["stitched_parts"] = len(group)
+        out.append(SimpleDoc(text, meta))
+    return out
