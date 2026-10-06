@@ -14,14 +14,14 @@ def search_local_etsi_specs(query: str, diagrams_only: bool = False) -> str:
 
     output_lines = [f"Found {len(hits)} matching local section(s):"]
     for i, h in enumerate(hits, 1):
-        payload = h.payload
+        payload = h.meta
         doc = payload.get("filename") or payload.get("doc_id")
         page = payload.get("page")
         heading = payload.get("heading", "")
         text = payload.get("text", "")
         diagrams = payload.get("diagram_paths", [])
 
-        output_lines.append(f"\n[Result {i}] Document: {doc} | Page: {page} | Score: {h.score:.2f}")
+        output_lines.append(f"\n[Result {i}] Document: {doc} | Page: {page}")
         if heading:
             output_lines.append(f"Section: {heading}")
         if diagrams:
