@@ -19,32 +19,11 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-import pymupdf
 from qdrant_client import models
 
+from etsi_mec_agent.identity import HEADER, cover_identity
 from etsi_mec_agent.store import get_qdrant_client
 from etsi_mec_agent.config import settings
-
-HEADER = re.compile(
-    r"ETSI\s+(?:GS|GR|TS|ISG)\s+(MEC(?:-DEC)?\s+\d+(?:-\d+)?)\s+"
-    r"V(\d+)\.(\d+)\.(\d+)\s*\((\d{4})-(\d{2})\)"
-)
-
-
-def cover_identity(pdf: Path) -> dict | None:
-    """{spec_id, edition, pub_date, key} from the cover pages, None if unnumbered."""
-    with pymupdf.open(str(pdf)) as doc:
-        head = " ".join(" ".join(doc[i].get_text() for i in range(min(3, doc.page_count))).split())
-    m = HEADER.search(head)
-    if not m:
-        return None
-    edition = f"V{m.group(2)}.{m.group(3)}.{m.group(4)}"
-    return {
-        "spec_id": re.sub(r"\s+", "-", m.group(1)),
-        "edition": edition,
-        "pub_date": f"{m.group(5)}-{m.group(6)}",
-        "key": tuple(int(p) for p in edition[1:].split(".")),
-    }
 
 
 def scan(specs_dir: Path) -> dict:
