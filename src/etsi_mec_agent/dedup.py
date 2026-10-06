@@ -38,7 +38,8 @@ def _stitch(a: str, b: str, max_overlap: int = 60) -> str:
 
 def _dedup_docs(docs: list, keep: int, per_doc: int = 1) -> list:
     """
-    Two-pass deduplication of retrieved hits.
+    Two-pass deduplication of retrieved hits. Caller contract: every item in `docs` must
+    expose `.content` (str) and `.meta` (dict; falsy counts as empty).
 
     Pass 1 — text fingerprint: markdown images are stripped from the content first and
     the first 400 chars of what remains are compared, in that order, which is why an
@@ -53,8 +54,12 @@ def _dedup_docs(docs: list, keep: int, per_doc: int = 1) -> list:
     document contribute more than its single best-ranked page.
     """
     # per_doc <= 0 would drop every excerpt (the per-doc count starts at 0 and is
-    # already >= it); clamp here rather than in argparse at all three call sites.
+    # already >= it); clamp here rather than in argparse for every caller.
     per_doc = max(1, per_doc)
+    # keep < 1 must mean "no results": the loop below appends before it checks the cap,
+    # so without this guard it hands back one excerpt. search.py's --top-k is unvalidated.
+    if keep < 1:
+        return []
     seen_text = set()
     after_text = []
     for doc in docs:
@@ -65,12 +70,13 @@ def _dedup_docs(docs: list, keep: int, per_doc: int = 1) -> list:
             after_text.append(doc)
 
     # ponytail: pass 1 runs first, so an excerpt it dropped is gone before per_doc is
-    # consulted; per_doc cannot rescue it. Upgrade path: run pass 2 before pass 1.
+    # consulted; per_doc cannot rescue it. Upgrade path: a single pass in rank order that
+    # applies both filters and continues past rejects until keep fills.
     counts = {}
     unique = []
     for doc in after_text:
-        meta = doc.meta if hasattr(doc, "meta") else {}
-        doc_id = (meta or {}).get("doc_id", "") or (doc.content or "")[:40]
+        meta = doc.meta or {}
+        doc_id = meta.get("doc_id", "") or (doc.content or "")[:40]
         n = counts.get(doc_id, 0)
         if n >= per_doc:
             continue
