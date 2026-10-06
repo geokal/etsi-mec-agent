@@ -232,6 +232,9 @@ def search_specs(
     # The LLM reads more than the terminal prints: retrieval must fetch enough
     # candidates to fill the evidence budget after stitching and dedup.
     fetch_k = max(top_k, answer_context) if generate else top_k
+    # The dense prefetch is the rerank pool and therefore the ceiling on how many excerpts
+    # ColBERT can rescore: a bigger evidence budget needs a bigger pool.
+    prefetch_limit = max(prefetch_limit, fetch_k)
     dense_model, colbert_model = get_embedders()
 
     t0 = time.time()
@@ -324,7 +327,6 @@ def search_specs(
         def __init__(self, hit):
             self.content = hit.payload.get("text", "")
             self.meta    = hit.payload
-            self._hit    = hit
 
     # Stitch first, then shape: parts 1+2 of one page come back as one excerpt, so the
     # merged text — not half a table row — is what dedup, printing and the LLM all see.
@@ -334,7 +336,8 @@ def search_specs(
 
     if len(deduped) < len(hit_docs):
         removed = len(hit_docs) - len(deduped)
-        print(f"[DEDUP] {len(hit_docs)} → {len(deduped)} unique results (removed {removed} duplicates).\n")
+        print(f"[DEDUP] {len(hit_docs)} stitched excerpts → {len(deduped)} unique results "
+              f"(page parts were merged first, then {removed} duplicate excerpt(s) dropped).\n")
 
 
     # Merged runs are SimpleDocs without a backing hit, so the loop reads doc.meta and
@@ -368,11 +371,7 @@ def search_specs(
               f"(~{sum(len(d.content.split()) for d in answer_docs)} words).")
         generate_answer(query_text, answer_docs, stream=stream, show_reasoning=show_reasoning)
 
-    # ponytail: still returns Qdrant hits rather than the displayed docs, because the one
-    # consumer of this value (tools/local_search.py) reads .payload and .score, and a stitched
-    # SimpleDoc carries neither. Ceiling: a stitched excerpt is absent from the returned list.
-    # Upgrade path: move that consumer onto doc.meta / doc.content and `return deduped`.
-    return [d._hit for d in deduped if hasattr(d, "_hit")]
+    return deduped
 
 
 
