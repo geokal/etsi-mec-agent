@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 import urllib.request
 from pathlib import Path
@@ -42,7 +43,11 @@ def _download_pdf(url: str, target_path: Path):
     with urllib.request.urlopen(req, timeout=30) as resp:
         if resp.status != 200:
             raise RuntimeError(f"Failed to download {url}: HTTP {resp.status}")
+        head = resp.read(4)
+        if head != b"%PDF":
+            raise RuntimeError(f"{url} is not a PDF (starts with {head!r})")
         with open(target_path, "wb") as out:
+            out.write(head)
             while True:
                 chunk = resp.read(65536)   # 64 KB at a time — never buffers full PDF in RAM
                 if not chunk:
@@ -50,22 +55,22 @@ def _download_pdf(url: str, target_path: Path):
                 out.write(chunk)
 
 def _spec_id_from_url(url: str) -> str:
-    """Extract a normalized spec identifier from a ETSI deliver PDF URL.
-    Example:
-        https://www.etsi.org/deliver/etsi_gs/MEC/001_099/002/04.01.01_60/gs_MEC002v040101p.pdf
-    becomes "MEC002".
+    """Return the spec ID declared by the URL's own filename.
+
+        .../002/04.01.01_60/gs_MEC002v040101p.pdf      -> MEC002
+        .../025/02.01.01_60/gr_mec-dec025v020101p.pdf  -> MEC-DEC025
+
+    The directory component is deliberately not used: for redirected or withdrawn
+    documents it disagrees with the file ETSI actually serves.
     """
-    import re
-    match = re.search(r"gs_MEC(\d{3})v", url, re.IGNORECASE)
-    if match:
-        return f"MEC{match.group(1)}"
-    # fallback – use the directory component before the version folder
-    parts = url.rstrip("/").split('/')
-    if len(parts) >= 5:
-        idx = parts.index('MEC')
-        if idx + 2 < len(parts):
-            return f"MEC{parts[idx+2].lstrip('0') or '0'}"
-    raise ValueError(f"Cannot infer spec ID from {url}")
+    stem = url.rstrip("/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    m = re.match(r"[a-z]+_([a-z-]+?)(\d{3,5})v\d{4,6}[a-z]?$", stem, re.IGNORECASE)
+    if not m:
+        raise ValueError(f"Cannot infer spec ID from {url}")
+    num = m.group(2)
+    if len(num) == 5:                      # gs_mec01002… is ETSI series part 010-02
+        num = f"{num[:3]}-{num[3:]}"
+    return f"{m.group(1).upper()}{num}"
 
 def _version_from_url(url: str) -> tuple:
     """Extract version tuple (major, minor, patch) from an ETSI deliver URL.
@@ -73,7 +78,6 @@ def _version_from_url(url: str) -> tuple:
     next two minor, next two patch. Returns (major, minor, patch) as ints.
     If the pattern is not found, returns (0, 0, 0) as a fallback.
     """
-    import re
     m = re.search(r"v(\d{2})(\d{2})(\d{2})", url, re.IGNORECASE)
     if m:
         major, minor, patch = map(int, m.groups())
@@ -105,16 +109,29 @@ def monitor_etsi_deliver(poll_interval: int = 3600) -> None:
                 continue
             if not pdf_url:
                 continue
+
+            # A search for an unpublished or withdrawn spec returns the nearest
+            # popular PDF, so the URL's own number must match the key before saving.
+            try:
+                found_id = _spec_id_from_url(pdf_url)
+            except ValueError as exc:
+                print(f"[monitor] skipping {spec_id}: {exc}")
+                continue
+            # Store under the identity the document declares, not the number we
+            # asked for: a lookup of an unpublished spec returns a neighbour PDF,
+            # and naming it after the request is how 52 duplicates were created.
+            if found_id != spec_id:
+                print(f"[monitor] {spec_id}: lookup returned {found_id} - filing as {found_id}.pdf")
+
             # URL we previously recorded for this spec (if any)
-            known_url = manifest.get(spec_id)
+            known_url = manifest.get(found_id)
 
             # Determine the highest known version from existing local PDFs (which may have version suffixes)
             # Look for files like MEC001_v3.2.1.pdf or gs_MEC001v030201p.pdf etc.
-            existing_files = list(DATA_SPEC_DIR.glob(f"{spec_id}*pdf"))
+            existing_files = list(DATA_SPEC_DIR.glob(f"{found_id}*pdf"))
             known_version = (0, 0, 0)
             if existing_files:
                 for f in existing_files:
-                    import re
                     m = re.search(r"v(\d{2})(\d{2})(\d{2})", f.name, re.IGNORECASE)
                     if m:
                         v = tuple(map(int, m.groups()))
@@ -129,7 +146,7 @@ def monitor_etsi_deliver(poll_interval: int = 3600) -> None:
                     known_version = _version_from_url(known_url)
 
             # Local PDF is stored directly under data/specs (no extra sub‑folder)
-            local_path = DATA_SPEC_DIR / f"{spec_id}.pdf"
+            local_path = DATA_SPEC_DIR / f"{found_id}.pdf"
 
             # Version from the freshly discovered URL
             new_version = _version_from_url(pdf_url)
@@ -142,7 +159,7 @@ def monitor_etsi_deliver(poll_interval: int = 3600) -> None:
                 except Exception as exc:
                     print(f"[monitor] failed to download {pdf_url}: {exc}")
                     continue
-                manifest[spec_id] = pdf_url
+                manifest[found_id] = pdf_url
                 updated = True
         if updated:
             save_manifest(manifest)
