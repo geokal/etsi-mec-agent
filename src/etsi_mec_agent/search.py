@@ -221,12 +221,17 @@ def search_specs(
     Display and evidence are two budgets: the terminal prints at most `top_k` excerpts,
     while an LLM answer reads up to `answer_context` excerpts with at most `per_doc` per
     document. That is what keeps the continuation of a long table in the prompt instead of
-    dropping it under the one-excerpt-per-document display rule.
+    dropping it under the one-excerpt-per-document display rule. When `generate` is set,
+    retrieval widens to `max(top_k, answer_context)` so the evidence budget can fill.
 
-    * Without --use-bm25    : original dense + ColBERT Qdrant query (unchanged).
-    * With    --use-bm25    : Qdrant server-side dense+sparse hybrid with RRF fusion.
-    * With    --answer      : feeds the retrieved chunks to the OpenRouter LLM.
+    * Without --use-bm25    : dense prefetch + ColBERT MaxSim rescore, then stitch and dedup.
+    * With    --use-bm25    : Qdrant server-side dense+sparse hybrid fused by RRF, then the
+                              same stitch and dedup.
+    * With    --answer      : feeds the `answer_context` excerpts to the OpenRouter LLM.
     * With    --show-reasoning : also prints the model's reasoning_details thinking chain.
+
+    Both paths print and return the same at-most-`top_k` display excerpts (SimpleDocs with
+    .content / .meta), or an empty list when nothing matched.
     """
     client = get_qdrant_client()
     # The LLM reads more than the terminal prints: retrieval must fetch enough
@@ -261,11 +266,16 @@ def search_specs(
             query_filter=query_filter,
         ))
 
+        if not stitched:
+            print("No matching documents found.")
+            return []
+
         unique_docs = _dedup_docs(stitched, keep=top_k)
         answer_docs = _dedup_docs(stitched, keep=answer_context, per_doc=per_doc) if generate else []
 
         if len(unique_docs) < len(stitched):
-            print(f"[DEDUP] {len(stitched)} → {len(unique_docs)} unique document(s) (removed {len(stitched)-len(unique_docs)} duplicates).\n")
+            print(f"[DEDUP] {len(stitched)} fetched → {len(unique_docs)} shown "
+                  f"(page parts merged first; the rest were duplicates or beyond --top-k).")
 
         print(f"[HYBRID] Retrieved {len(unique_docs)} unique document(s).\n")
         for i, doc in enumerate(unique_docs, 1):
@@ -291,12 +301,12 @@ def search_specs(
             print(f"[ANSWER CONTEXT] {len(answer_docs)} excerpts, up to {per_doc} per document "
                   f"(~{sum(len(d.content.split()) for d in answer_docs)} words).")
             generate_answer(query_text, answer_docs, stream=stream, show_reasoning=show_reasoning)
-        return []
+        return unique_docs
 
 
 
     # ------------------------------------------------------------------
-    # 2️⃣  Original dense + ColBERT query (unchanged)
+    # 2️⃣  Dense prefetch + ColBERT MaxSim rescore
     # ------------------------------------------------------------------
     results = client.query_points(
         collection_name=settings.qdrant_index,
@@ -322,22 +332,15 @@ def search_specs(
         print("No matching documents found.")
         return []
 
-    # Wrap hits as _HitDoc objects so _dedup_docs can handle them uniformly
-    class _HitDoc:
-        def __init__(self, hit):
-            self.content = hit.payload.get("text", "")
-            self.meta    = hit.payload
-
     # Stitch first, then shape: parts 1+2 of one page come back as one excerpt, so the
     # merged text — not half a table row — is what dedup, printing and the LLM all see.
-    hit_docs  = _stitch_parts([_HitDoc(h) for h in results.points])
+    hit_docs  = _stitch_parts([SimpleDoc(h.payload.get("text", ""), h.payload) for h in results.points])
     deduped   = _dedup_docs(hit_docs, keep=top_k)
     answer_docs = _dedup_docs(hit_docs, keep=answer_context, per_doc=per_doc) if generate else []
 
     if len(deduped) < len(hit_docs):
-        removed = len(hit_docs) - len(deduped)
-        print(f"[DEDUP] {len(hit_docs)} stitched excerpts → {len(deduped)} unique results "
-              f"(page parts were merged first, then {removed} duplicate excerpt(s) dropped).\n")
+        print(f"[DEDUP] {len(hit_docs)} fetched → {len(deduped)} shown "
+              f"(page parts merged first; the rest were duplicates or beyond --top-k).")
 
 
     # Merged runs are SimpleDocs without a backing hit, so the loop reads doc.meta and
@@ -384,7 +387,7 @@ def main():
         description="Hybrid (Dense + ColBERT) search for ETSI MEC specifications."
     )
     parser.add_argument("query", type=str, help="Search query (e.g., 'What is Mp1 reference point?')")
-    parser.add_argument("--top-k",    type=int, default=5,  help="Number of results to return (default: 5)")
+    parser.add_argument("--top-k",    type=int, default=5,  help="Excerpts to print in the terminal (default: 5); --answer reads --answer-context")
     parser.add_argument("--prefetch", type=int, default=25, help="Dense candidates to prefetch (default: 25)")
     parser.add_argument("--answer-context", type=int, default=15,
                         help="Excerpts handed to the LLM with --answer (terminal still shows --top-k)")
@@ -418,6 +421,8 @@ def main():
         parser.error("--per-doc must be >= 1")
     if args.answer_context < 1:
         parser.error("--answer-context must be >= 1")
+    if args.top_k < 1:
+        parser.error("--top-k must be >= 1")
     search_specs(
         args.query,
         top_k=args.top_k,
