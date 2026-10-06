@@ -75,26 +75,12 @@ def _run_hybrid_retrieval(
         query_filter=query_filter,
     )
 
-    class _Doc:
-        def __init__(self, text, meta):
-            self.content = text
-            self.meta = meta
-
-    return [_Doc(h.payload.get("text", ""), h.payload) for h in results.points]
+    return [SimpleDoc(h.payload.get("text", ""), h.payload) for h in results.points]
 
 
 # ---------------------------------------------------------------------------
 # LLM answer generation (OpenRouter free model, OpenAI-compatible SDK)
 # ---------------------------------------------------------------------------
-
-def _make_simple_doc(text: str, meta: dict):
-    """Tiny stand-in for a Document object – just a namespace with .content and .meta."""
-    class _Doc:
-        def __init__(self, c, m):
-            self.content = c
-            self.meta = m
-    return _Doc(text, meta)
-
 
 def generate_answer(query: str, documents: list, stream: bool = False, show_reasoning: bool = False) -> str:
     """
@@ -319,7 +305,7 @@ def search_specs(
         print("No matching documents found.")
         return []
 
-    # Wrap hits as _Doc objects so _dedup_docs can handle them uniformly
+    # Wrap hits as _HitDoc objects so _dedup_docs can handle them uniformly
     class _HitDoc:
         def __init__(self, hit):
             self.content = hit.payload.get("text", "")
@@ -360,7 +346,7 @@ def search_specs(
     # 3️⃣  Optional LLM answer generation (dense+ColBERT path)
     # ------------------------------------------------------------------
     if generate:
-        docs = [_make_simple_doc(hit.payload.get("text", ""), hit.payload) for hit in unique_points]
+        docs = [SimpleDoc(hit.payload.get("text", ""), hit.payload) for hit in unique_points]
         generate_answer(query_text, docs, stream=stream, show_reasoning=show_reasoning)
 
     return unique_points
