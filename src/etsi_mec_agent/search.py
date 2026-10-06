@@ -7,7 +7,7 @@ from fastembed import LateInteractionTextEmbedding, TextEmbedding
 from qdrant_client import models
 
 from etsi_mec_agent.config import settings
-from etsi_mec_agent.dedup import SimpleDoc, _dedup_docs
+from etsi_mec_agent.dedup import SimpleDoc, _dedup_docs, _stitch_parts
 from etsi_mec_agent.store import get_qdrant_client
 
 
@@ -208,6 +208,8 @@ def search_specs(
     prefetch_limit: int = 25,
     diagrams_only: bool = False,
     use_bm25: bool = False,
+    answer_context: int = 15,
+    per_doc: int = 2,
     generate: bool = False,
     stream: bool = False,
     show_reasoning: bool = False,
@@ -216,12 +218,20 @@ def search_specs(
     Execute Hybrid Search (Dense + ColBERT) with optional BM25+Vector hybrid
     and optional LLM answer generation.
 
+    Display and evidence are two budgets: the terminal prints at most `top_k` excerpts,
+    while an LLM answer reads up to `answer_context` excerpts with at most `per_doc` per
+    document. That is what keeps the continuation of a long table in the prompt instead of
+    dropping it under the one-excerpt-per-document display rule.
+
     * Without --use-bm25    : original dense + ColBERT Qdrant query (unchanged).
     * With    --use-bm25    : Qdrant server-side dense+sparse hybrid with RRF fusion.
     * With    --answer      : feeds the retrieved chunks to the OpenRouter LLM.
     * With    --show-reasoning : also prints the model's reasoning_details thinking chain.
     """
     client = get_qdrant_client()
+    # The LLM reads more than the terminal prints: retrieval must fetch enough
+    # candidates to fill the evidence budget after stitching and dedup.
+    fetch_k = max(top_k, answer_context) if generate else top_k
     dense_model, colbert_model = get_embedders()
 
     t0 = time.time()
@@ -239,19 +249,20 @@ def search_specs(
     # ------------------------------------------------------------------
     if use_bm25:
         print(f"\n[QUERY] '{query_text}' [HYBRID: Dense + sparse prefetch → server-side RRF]")
-        hybrid_docs = _run_hybrid_retrieval(
+        stitched = _stitch_parts(_run_hybrid_retrieval(
             client=client,
             query_text=query_text,
             query_dense=query_dense,
-            top_k=top_k * 6,          # fetch 6× more so dedup still yields top_k unique docs
+            top_k=fetch_k * 6,        # fetch 6× more so dedup still fills the evidence budget
             prefetch_limit=max(prefetch_limit * 4, 100),
             query_filter=query_filter,
-        )
+        ))
 
-        unique_docs = _dedup_docs(hybrid_docs, keep=top_k)
+        unique_docs = _dedup_docs(stitched, keep=top_k)
+        answer_docs = _dedup_docs(stitched, keep=answer_context, per_doc=per_doc) if generate else []
 
-        if len(unique_docs) < len(hybrid_docs):
-            print(f"[DEDUP] {len(hybrid_docs)} → {len(unique_docs)} unique document(s) (removed {len(hybrid_docs)-len(unique_docs)} duplicates).\n")
+        if len(unique_docs) < len(stitched):
+            print(f"[DEDUP] {len(stitched)} → {len(unique_docs)} unique document(s) (removed {len(stitched)-len(unique_docs)} duplicates).\n")
 
         print(f"[HYBRID] Retrieved {len(unique_docs)} unique document(s).\n")
         for i, doc in enumerate(unique_docs, 1):
@@ -274,7 +285,9 @@ def search_specs(
             print("=" * 65 + "\n")
 
         if generate:
-            generate_answer(query_text, unique_docs, stream=stream, show_reasoning=show_reasoning)
+            print(f"[ANSWER CONTEXT] {len(answer_docs)} excerpts, up to {per_doc} per document "
+                  f"(~{sum(len(d.content.split()) for d in answer_docs)} words).")
+            generate_answer(query_text, answer_docs, stream=stream, show_reasoning=show_reasoning)
         return []
 
 
@@ -292,14 +305,15 @@ def search_specs(
         ),
         query=query_colbert,
         using="colbert",
-        limit=top_k,
+        limit=fetch_k,
         query_filter=query_filter,
     )
     elapsed = (time.time() - t0) * 1000
 
     filter_info = " [FILTER: Diagrams Only]" if diagrams_only else ""
     print(f"\n[QUERY] '{query_text}'{filter_info}")
-    print(f"[SEARCH] Dense Prefetch ({prefetch_limit}) + ColBERT MaxSim Rescore -> Top {top_k} ({elapsed:.1f}ms)\n")
+    print(f"[SEARCH] Dense Prefetch ({prefetch_limit}) + ColBERT MaxSim Rescore -> "
+          f"Top {fetch_k} fetched, {top_k} displayed ({elapsed:.1f}ms)\n")
 
     if not results.points:
         print("No matching documents found.")
@@ -312,26 +326,30 @@ def search_specs(
             self.meta    = hit.payload
             self._hit    = hit
 
-    hit_docs  = [_HitDoc(h) for h in results.points]
+    # Stitch first, then shape: parts 1+2 of one page come back as one excerpt, so the
+    # merged text — not half a table row — is what dedup, printing and the LLM all see.
+    hit_docs  = _stitch_parts([_HitDoc(h) for h in results.points])
     deduped   = _dedup_docs(hit_docs, keep=top_k)
-    unique_points = [d._hit for d in deduped]
+    answer_docs = _dedup_docs(hit_docs, keep=answer_context, per_doc=per_doc) if generate else []
 
-    if len(unique_points) < len(results.points):
-        removed = len(results.points) - len(unique_points)
-        print(f"[DEDUP] {len(results.points)} → {len(unique_points)} unique results (removed {removed} duplicates).\n")
+    if len(deduped) < len(hit_docs):
+        removed = len(hit_docs) - len(deduped)
+        print(f"[DEDUP] {len(hit_docs)} → {len(deduped)} unique results (removed {removed} duplicates).\n")
 
 
-    for i, hit in enumerate(unique_points, 1):
-        payload = hit.payload
+    # Merged runs are SimpleDocs without a backing hit, so the loop reads doc.meta and
+    # drops the per-hit score: a stitched excerpt is several hits and has no single score.
+    for i, doc in enumerate(deduped, 1):
+        payload = doc.meta or {}
         doc_id        = payload.get("doc_id", "Unknown")
         filename      = payload.get("filename", "")
         page          = payload.get("page", "N/A")
         heading       = payload.get("heading", "")
-        text          = payload.get("text", "").strip()
+        text          = (doc.content or "").strip()
         has_diagram   = payload.get("has_diagram", False)
         diagram_paths = payload.get("diagram_paths", [])
 
-        print(f"=== [Result {i}] Score: {hit.score:.4f} | Page: {page} | Doc: {filename or doc_id} ===")
+        print(f"=== [Result {i}] Page: {page} | Doc: {filename or doc_id} ===")
         if heading:
             print(f"🔖 Section: {heading}")
         if has_diagram and diagram_paths:
@@ -346,10 +364,15 @@ def search_specs(
     # 3️⃣  Optional LLM answer generation (dense+ColBERT path)
     # ------------------------------------------------------------------
     if generate:
-        docs = [SimpleDoc(hit.payload.get("text", ""), hit.payload) for hit in unique_points]
-        generate_answer(query_text, docs, stream=stream, show_reasoning=show_reasoning)
+        print(f"[ANSWER CONTEXT] {len(answer_docs)} excerpts, up to {per_doc} per document "
+              f"(~{sum(len(d.content.split()) for d in answer_docs)} words).")
+        generate_answer(query_text, answer_docs, stream=stream, show_reasoning=show_reasoning)
 
-    return unique_points
+    # ponytail: still returns Qdrant hits rather than the displayed docs, because the one
+    # consumer of this value (tools/local_search.py) reads .payload and .score, and a stitched
+    # SimpleDoc carries neither. Ceiling: a stitched excerpt is absent from the returned list.
+    # Upgrade path: move that consumer onto doc.meta / doc.content and `return deduped`.
+    return [d._hit for d in deduped if hasattr(d, "_hit")]
 
 
 
@@ -364,6 +387,10 @@ def main():
     parser.add_argument("query", type=str, help="Search query (e.g., 'What is Mp1 reference point?')")
     parser.add_argument("--top-k",    type=int, default=5,  help="Number of results to return (default: 5)")
     parser.add_argument("--prefetch", type=int, default=25, help="Dense candidates to prefetch (default: 25)")
+    parser.add_argument("--answer-context", type=int, default=15,
+                        help="Excerpts handed to the LLM with --answer (terminal still shows --top-k)")
+    parser.add_argument("--per-doc", type=int, default=2,
+                        help="Excerpts per document inside --answer-context (>= 1)")
     parser.add_argument(
         "--diagrams-only", action="store_true",
         help="Filter results to only passages containing architectural diagrams/charts",
@@ -386,12 +413,20 @@ def main():
     )
 
     args = parser.parse_args()
+    # _dedup_docs clamps for programmatic callers; someone typing --per-doc 0 means "no
+    # limit", so say so instead of silently handing them one excerpt per document.
+    if args.per_doc < 1:
+        parser.error("--per-doc must be >= 1")
+    if args.answer_context < 1:
+        parser.error("--answer-context must be >= 1")
     search_specs(
         args.query,
         top_k=args.top_k,
         prefetch_limit=args.prefetch,
         diagrams_only=args.diagrams_only,
         use_bm25=args.use_bm25,
+        answer_context=args.answer_context,
+        per_doc=args.per_doc,
         generate=args.answer,
         stream=args.stream,
         show_reasoning=args.show_reasoning,
