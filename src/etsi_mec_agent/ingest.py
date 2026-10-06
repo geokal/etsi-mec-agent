@@ -14,6 +14,7 @@ from fastembed import LateInteractionTextEmbedding, TextEmbedding
 from qdrant_client.models import PointStruct
 
 from etsi_mec_agent.config import settings
+from etsi_mec_agent.search import _token_sparse
 from etsi_mec_agent.store import ensure_collection, get_qdrant_client
 
 # Ensure stdout flushes immediately in real-time
@@ -300,7 +301,7 @@ def ingest_single_pdf(
         batch_points = [
             PointStruct(
                 id=str(uuid.uuid4()),
-                vector={"dense": d_vec.tolist(), "colbert": c_vec.tolist()},
+                vector={"dense": d_vec.tolist(), "colbert": c_vec.tolist(), "sparse": _token_sparse(text)},
                 payload={"text": text, **meta},
             )
             for text, meta, d_vec, c_vec in zip(batch_texts, batch_meta, dense_embeddings, colbert_embeddings)
