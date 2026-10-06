@@ -40,6 +40,7 @@ src/etsi_mec_agent/
 
 scripts/
   backfill_clip.py          # add 'clip' vectors to existing collection (no re-ingest)
+  backfill_spec_identity.py # stamp spec_id/edition/is_current/content_md5 from the PDF cover (no re-ingest)
   deduplicate_collection.py # remove duplicate chunks in-place (no re-embed)
   audit_specs.py            # report data/specs files and manifest keys naming the wrong spec
   check_dedup_stitch.py     # asserts for dedup.py; no models, no Qdrant
@@ -99,6 +100,11 @@ uv run python scripts/deduplicate_collection.py
 # Golden-question retrieval eval (recall@k for both paths + the --answer budget)
 uv run python scripts/eval_rag.py --top-k 5
 
+# Spec identity: report, then write payloads, then check search_specs honours them
+uv run python scripts/backfill_spec_identity.py
+uv run python scripts/backfill_spec_identity.py --apply
+uv run python scripts/backfill_spec_identity.py --verify
+
 # Visualise spec relationships
 uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
 ```
@@ -117,6 +123,7 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
 | `--top-k N` | Excerpts printed in the terminal (default 5) |
 | `--answer-context N` | Excerpts handed to the LLM with `--answer` (default 15; the terminal still prints `--top-k`) |
 | `--per-doc N` | Excerpts per document inside `--answer-context` (default 2) — all three rejected below 1 |
+| `--all-editions` | Also search superseded editions; by default chunks stamped `is_current=false` are filtered out |
 
 ---
 
@@ -124,7 +131,14 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
 
 - **Three named vectors per point**: `dense` (384-dim Cosine, global recall) + `colbert` (128-dim Dot MaxSim on_disk, precision re-rank) + `sparse` (crc32-hashed raw term frequencies, `Modifier.IDF` applied server-side). `dense` + `sparse` feed the hybrid query; `colbert` feeds the re-rank path.
 - **`--use-bm25` does NOT use Haystack** — the collection was created outside Haystack and `QdrantDocumentStore` rejects it. Fusion happens inside Qdrant: `search.py::_run_hybrid_retrieval` sends two `Prefetch`es plus `FusionQuery(fusion=models.Fusion.RRF)`. `Fusion.RRF` is an enum member — passing it called (`RRF()`) raises `TypeError: 'Fusion' object is not callable`.
-- **Display and evidence are two budgets.** `search_specs` prints `_dedup_docs(stitched, keep=--top-k)` (one excerpt per `doc_id`) and hands the LLM `_dedup_docs(stitched, keep=--answer-context, per_doc=--per-doc)` over the same stitched list. A page the 300-word window splits is stored as `chunk_part 1 of 2` / `2 of 2`, so `_stitch_parts()` runs first: one chunk per document used to discard the continuation and hand the LLM a table ending mid-cell.
+- **Display and evidence are two budgets.** `search_specs` prints `_dedup_docs(stitched, keep=--top-k)` (one excerpt per document) and hands the LLM `_dedup_docs(stitched, keep=--answer-context, per_doc=--per-doc)` over the same stitched list. A page the 300-word window splits is stored as `chunk_part 1 of 2` / `2 of 2`, so `_stitch_parts()` runs first: one chunk per document used to discard the continuation and hand the LLM a table ending mid-cell.
+- **Spec identity comes from the PDF cover, never the filename.** 59 of the 106 doc_ids in
+  `data/specs/` hold another spec's content (`MEC041.pdf` is GS MEC 040) and 52 are byte-identical
+  copies of another file, so `scripts/backfill_spec_identity.py` stamps `spec_id` / `edition` /
+  `pub_date` / `content_md5` / `is_current` onto the stored points — no re-embedding. From there
+  `search.py::build_filter` excludes `is_current=false` and `_dedup_docs` spends the `--per-doc`
+  quota per `content_md5`, so four aliases of one spec share a quota instead of each claiming one.
+  Nothing new should key on `doc_id` alone; `doc_id` is a filename and filenames lie here.
 - **`openrouter/free`** is the correct model ID for the free-tier routing endpoint. Do not change it to a specific model ID unless the user requests a pinned model.
 - **`has_diagram` index** is `PayloadSchemaType.BOOL` — an older collection has it as `KEYWORD` (bug, pre-fix). Recreating the index fixes it.
 - **batch_size=16** in `ingest.py` — safe for 16 GB RAM with 300-word chunks. Do not lower without a good reason.

@@ -252,13 +252,13 @@ Produces `etsi_mec_graph.png` — a force-directed graph where each node is a ME
 ## How an answer is assembled (and its current limits)
 
 `generate_answer()` builds one system prompt plus a single context block: every retrieved chunk
-gets a `[Source i] filename p.page — heading` header, its text, and any diagram paths listed as
-text. One request, one answer.
+gets a `[Source i] MEC-003 V4.1.1 (stored as MEC023.pdf) p.page — heading` header, its text, and
+any diagram paths listed as text. One request, one answer.
 
 Worth knowing before trusting an aggregation-style question:
 
 - **Two budgets, not one.** The terminal prints at most `--top-k` excerpts (default 5), one per
-  `doc_id` — the rule that stops one spec monopolising the slots. `--answer` reads a separate
+  document — the rule that stops one spec monopolising the slots. `--answer` reads a separate
   evidence set over the same stitched list: up to `--answer-context` excerpts (default 15), with
   up to `--per-doc` (default 2) from any one document. Parts of a page that the 300-word window
   split are merged before either budget, so a table reaches the prompt whole instead of losing its
@@ -270,10 +270,15 @@ Worth knowing before trusting an aggregation-style question:
   model can cite a figure but cannot read it.
 - **One query, one pass.** No sub-question decomposition and no second retrieval round over what
   the first pass missed.
-- **Document labels are approximate.** `data/specs` holds byte-identical PDFs saved under several
-  spec numbers (106 files, 54 unique) and several editions of the same spec (GS MEC 003
-  V2.2.1 / V3.1.1 / V4.1.1) are indexed together, so a citation can name a spec the text does not
-  belong to, or quote a superseded edition.
+- **Labels are read off the PDF, not the filename.** `data/specs` holds 106 files but only 54
+  documents: 59 filenames name a spec whose text they do not contain (`MEC041.pdf` is GS MEC 040),
+  52 are byte-identical copies of another file, and three editions of GS MEC 003 were indexed side
+  by side. `scripts/backfill_spec_identity.py` reads the ETSI title line off each cover and stamps
+  `spec_id` / `edition` / `is_current` / `content_md5` onto the stored points; retrieval then drops
+  superseded editions (`--all-editions` brings them back) and spends the `--per-doc` quota per
+  `content_md5`, so the four aliases of one spec share a quota instead of each claiming one. The
+  redundant chunks are still in the collection — filtering and labelling cost nothing, deleting is
+  the separate, deliberate step.
 
 Raising `--top-k` buys more printed excerpts, not better synthesis; `--answer-context` and
 `--per-doc` buy evidence. Cross-document aggregation still needs row/clause-aware chunking and a

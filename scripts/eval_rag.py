@@ -9,10 +9,12 @@ Exercises three retrieval paths from etsi_mec_agent.search:
               measured over the same --answer-context / --per-doc budget the CLI uses
               (defaults 15 / 2). This column is the LLM's evidence, not the --top-k printed.
 
-A question passes when a top-k chunk from the expected document contains
-one of its expected keywords. Questions whose keywords exist nowhere in
-the expected document are flagged EVIDENCE-MISSING (bad golden data, not
-a retrieval failure) so the numbers stay honest.
+A question passes when a top-k chunk from the expected spec contains one of its
+expected keywords. `doc` names a content-derived spec identity (MEC-003), not a filename,
+and every path is measured behind build_filter() — the same current-editions-only filter
+search_specs ships — because 59 of the 106 doc_ids name a different spec than the text
+they hold. Questions whose keywords exist nowhere in the expected spec are flagged
+EVIDENCE-MISSING (bad golden data, not a retrieval failure) so the numbers stay honest.
 """
 import argparse
 import sys
@@ -24,27 +26,36 @@ from qdrant_client import models
 
 from etsi_mec_agent.config import settings
 from etsi_mec_agent.dedup import SimpleDoc, _dedup_docs, _stitch_parts
-from etsi_mec_agent.search import _run_hybrid_retrieval, get_embedders
+from etsi_mec_agent.search import _run_hybrid_retrieval, build_filter, get_embedders
 from etsi_mec_agent.store import get_qdrant_client
+
+
+def doc_key(meta):
+    """The document a chunk belongs to: its content-derived spec, else its doc_id."""
+    return (meta or {}).get("spec_id") or (meta or {}).get("doc_id", "")
 
 # doc=None means any document may satisfy the question.
 QUESTIONS = [
-    {"id": "q01", "query": "Which reference point connects the MEC application to the MEC platform?", "doc": "MEC003", "kw": ["Mp1"]},
-    {"id": "q02", "query": "Which reference point connects the MEC platform to the MEC orchestrator?", "doc": "MEC003", "kw": ["Mm3"]},
-    {"id": "q03", "query": "What is the Mm6 reference point used for?", "doc": "MEC003", "kw": ["Mm6"]},
+    {"id": "q01", "query": "Which reference point connects the MEC application to the MEC platform?", "doc": "MEC-003", "kw": ["Mp1"]},
+    {"id": "q02", "query": "Which reference point connects the MEC platform to the MEC orchestrator?", "doc": "MEC-003", "kw": ["Mm3"]},
+    {"id": "q03", "query": "What is the Mm6 reference point used for?", "doc": "MEC-003", "kw": ["Mm6"]},
     {"id": "q04", "query": "Which service exposes radio network information to applications?", "doc": None, "kw": ["RNIS", "Radio Network Information"]},
     {"id": "q05", "query": "What is the Edge Enabler Client (EEC)?", "doc": None, "kw": ["Edge Enabler Client", "EEC"]},
-    {"id": "q06", "query": "What traffic influence rules does the TCR expose?", "doc": None, "kw": ["traffic influence", "TCR"]},
+    # "TCR" occurs in no chunk of this corpus; the entity that expresses traffic influence
+    # policies toward the 5GC is the CCMF acting as an AF over Nnef_TrafficInfluence.
+    {"id": "q06", "query": "Over which 5GC service does the CCMF express application-specific traffic influence policies?", "doc": "MEC-059", "kw": ["Nnef_TrafficInfluence"]},
     {"id": "q07", "query": "Which service continuity modes are defined for MEC applications?", "doc": None, "kw": ["service continuity"]},
-    {"id": "q08", "query": "What is the User app LCM proxy?", "doc": "MEC003", "kw": ["LCM proxy"]},
-    {"id": "q09", "query": "How does a road tunnel affect TCP congestion control in the MEC use case?", "doc": "MEC002", "kw": ["road tunnel", "TCP"]},
-    {"id": "q10", "query": "What are the components of the MEC host level reference architecture?", "doc": "MEC003", "kw": ["MEC host", "Virtualisation"]},
-    {"id": "q11", "query": "What is the UU interface used for in the V2X deployment?", "doc": "MEC030", "kw": ["uu interface"]},
-    {"id": "q12", "query": "Which API is used to select a MEC system for application instantiation?", "doc": None, "kw": ["Mm5", "Mm6"]},
+    {"id": "q08", "query": "What is the User app LCM proxy?", "doc": "MEC-003", "kw": ["LCM proxy"]},
+    {"id": "q09", "query": "How does a road tunnel affect TCP congestion control in the MEC use case?", "doc": "MEC-002", "kw": ["road tunnel", "TCP"]},
+    {"id": "q10", "query": "What are the components of the MEC host level reference architecture?", "doc": "MEC-003", "kw": ["MEC host", "Virtualisation"]},
+    {"id": "q11", "query": "What is the UU interface used for in the V2X deployment?", "doc": "MEC-030", "kw": ["uu interface"]},
+    # Was kw ["Mm5", "Mm6"]: "Mm5" occurs in 56 chunks, so any of them counted as evidence and
+    # no ranking could single the selection step out. "selects the MEC host" occurs in 2.
+    {"id": "q12", "query": "Which entity selects the MEC host for application instantiation?", "doc": None, "kw": ["selects the MEC host"]},
     {"id": "q13", "query": "How does DNS resolution steer users to the closest MEC server?", "doc": None, "kw": ["DNS"]},
-    {"id": "q14", "query": "What is the role of the MEC platform in service discovery?", "doc": "MEC003", "kw": ["service registration", "discovery"]},
+    {"id": "q14", "query": "What is the role of the MEC platform in service discovery?", "doc": "MEC-003", "kw": ["service registration", "discovery"]},
     {"id": "q15", "query": "Which interface carries the mpInfoService between platform and orchestrator?", "doc": None, "kw": ["mpInfoService", "Mm3"]},
-    {"id": "q16", "query": "What is a MEC service and how does it relate to a MEC application?", "doc": "MEC003", "kw": ["MEC service"]},
+    {"id": "q16", "query": "What is a MEC service and how does it relate to a MEC application?", "doc": "MEC-003", "kw": ["MEC service"]},
 ]
 
 
@@ -55,10 +66,13 @@ def load_corpus(client):
     while True:
         pts, offset = client.scroll(
             collection_name=settings.qdrant_index, limit=500,
-            with_payload=["doc_id", "text"], with_vectors=False, offset=offset,
+            with_payload=["doc_id", "spec_id", "is_current", "text"],
+            with_vectors=False, offset=offset,
         )
         for p in pts:
-            doc = p.payload.get("doc_id", "")
+            if (p.payload or {}).get("is_current") is False:
+                continue      # the eval measures the path search_specs actually ships
+            doc = doc_key(p.payload)
             corpus[doc] = corpus.get(doc, "") + "\n" + p.payload.get("text", "").lower()
         if offset is None:
             break
@@ -73,26 +87,27 @@ def evidence_ok(q, corpus):
 def hits_colbert(client, q_dense, q_colbert, k):
     res = client.query_points(
         collection_name=settings.qdrant_index,
-        prefetch=models.Prefetch(query=q_dense, using="dense", limit=25),
+        prefetch=models.Prefetch(query=q_dense, using="dense", limit=25, filter=build_filter()),
         query=q_colbert, using="colbert", limit=k,  # exactly what search_specs requests
+        query_filter=build_filter(),
     )
 
     # Same wrapper search_specs builds for its own hits, so _dedup_docs applies identically.
     docs = [SimpleDoc(h.payload.get("text", ""), h.payload) for h in res.points]
-    return [(d.meta.get("doc_id", ""), d.content) for d in _dedup_docs(docs, keep=k)]
+    return [(doc_key(d.meta), d.content) for d in _dedup_docs(docs, keep=k)]
 
 
 def hits_hybrid(client, q_text, q_dense, k):
     raw = _run_hybrid_retrieval(client, q_text, q_dense, top_k=k * 6, prefetch_limit=100)  # defaults from search_specs
     raw = _dedup_docs(raw, keep=k)  # same post-fusion dedup as search_specs
-    return [(d.meta.get("doc_id", ""), d.content or "") for d in raw]
+    return [(doc_key(d.meta), d.content or "") for d in raw]
 
 
 def hits_aggregate(client, q_text, q_dense, ctx=15, per_doc=2):
     """What --answer sees: contiguous page parts stitched, up to per_doc excerpts per doc."""
     raw = _run_hybrid_retrieval(client, q_text, q_dense, top_k=ctx * 6, prefetch_limit=100)
     docs = _dedup_docs(_stitch_parts(raw), keep=ctx, per_doc=per_doc)
-    return [(d.meta.get("doc_id", ""), d.content) for d in docs]
+    return [(doc_key(d.meta), d.content) for d in docs]
 
 
 def first_hit_rank(hits, q, k):

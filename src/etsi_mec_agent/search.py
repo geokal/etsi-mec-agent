@@ -17,6 +17,23 @@ def get_embedders():
     return dense_model, colbert_model
 
 
+def build_filter(current_only: bool = True, diagrams_only: bool = False):
+    """The payload filter search_specs sends, shared with scripts/eval_rag.py.
+
+    must_not is_current=false rather than must is_current=true: chunks written before
+    scripts/backfill_spec_identity.py carry no is_current field at all, and a missing field
+    only survives the must_not form.
+    """
+    must, must_not = [], []
+    if diagrams_only:
+        must.append(models.FieldCondition(key="has_diagram", match=models.MatchValue(value=True)))
+    if current_only:
+        must_not.append(
+            models.FieldCondition(key="is_current", match=models.MatchValue(value=False))
+        )
+    return models.Filter(must=must, must_not=must_not) if (must or must_not) else None
+
+
 # ---------------------------------------------------------------------------
 # Hybrid retrieval — dense + server-side sparse BM25 (no Haystack required)
 # ---------------------------------------------------------------------------
@@ -119,8 +136,13 @@ def generate_answer(query: str, documents: list, stream: bool = False, show_reas
             text = str(doc)
             meta = {}
 
+        # Label excerpts by what the PDF actually contains, not by the file it was saved as:
+        # 59 of this corpus's doc_ids name a different spec than the text they hold.
+        fname = meta.get("filename", "unknown")
+        ident = (f"{meta['spec_id']} {meta.get('edition')} (stored as {fname})"
+                 if meta.get("spec_id") else fname)
         src_label = (
-            f"[Source {i}] {meta.get('filename', 'unknown')} "
+            f"[Source {i}] {ident} "
             f"p.{meta.get('page', '?')} — {meta.get('heading', '')}"
         ).strip(" —")
         diagrams = meta.get("diagram_paths", [])
@@ -139,7 +161,9 @@ def generate_answer(query: str, documents: list, stream: bool = False, show_reas
                 "You are a technical writer specialising in ETSI MEC (Multi-access Edge Computing) "
                 "specifications. When answering questions:\n"
                 "• Write a comprehensive, well-structured answer of at least 3–5 paragraphs.\n"
-                "• Cite the source document and page for every claim, e.g. (MEC003 p.18).\n"
+                "• Cite the specification and edition labelled on each [Source …] line, with its "
+                "page, e.g. (MEC-003 V4.1.1 p.18). What follows \"stored as\" is only where the PDF "
+                "sits on disk and is not the citation.\n"
                 "• If a diagram is listed in the context (📐 Diagram(s) available: …), "
                 "reference it explicitly by filename in your answer.\n"
                 "• Use the ETSI standard terminology (reference points, functional entities, etc.).\n"
@@ -207,6 +231,7 @@ def search_specs(
     top_k: int = 5,
     prefetch_limit: int = 25,
     diagrams_only: bool = False,
+    current_only: bool = True,
     use_bm25: bool = False,
     answer_context: int = 15,
     per_doc: int = 2,
@@ -229,6 +254,11 @@ def search_specs(
                               same stitch and dedup.
     * With    --answer      : feeds the `answer_context` excerpts to the OpenRouter LLM.
     * With    --show-reasoning : also prints the model's reasoning_details thinking chain.
+    * By    --all-editions    : keep chunks stamped is_current=false; by default a superseded
+                              edition is filtered server-side. Excerpts are bucketed by
+                              content_md5, so the doc_ids that are byte-identical copies of
+                              another spec share one per-doc quota instead of each claiming
+                              its own.
 
     Both paths print and return the same at-most-`top_k` display excerpts (SimpleDocs with
     .content / .meta), or an empty list when nothing matched.
@@ -252,17 +282,17 @@ def search_specs(
     query_dense = list(dense_model.embed([query_text]))[0].tolist()
     query_colbert = list(colbert_model.query_embed(query_text))[0].tolist()
 
-    query_filter = None
-    if diagrams_only:
-        query_filter = models.Filter(
-            must=[models.FieldCondition(key="has_diagram", match=models.MatchValue(value=True))]
-        )
+    query_filter = build_filter(current_only=current_only, diagrams_only=diagrams_only)
+    notes = (["current editions only"] if current_only else []) + \
+            (["diagrams only"] if diagrams_only else [])
+    filter_info = f" [FILTER: {', '.join(notes)}]" if notes else ""
 
     # ------------------------------------------------------------------
     # 1️⃣  Hybrid retrieval (dense + sparse prefetch, fused server-side by RRF)
     # ------------------------------------------------------------------
     if use_bm25:
-        print(f"\n[QUERY] '{query_text}' [HYBRID: Dense + sparse prefetch → server-side RRF]")
+        print(f"\n[QUERY] '{query_text}' [HYBRID: Dense + sparse prefetch → server-side RRF]"
+              f"{filter_info}")
         stitched = _stitch_parts(_run_hybrid_retrieval(
             client=client,
             query_text=query_text,
@@ -287,12 +317,14 @@ def search_specs(
         for i, doc in enumerate(unique_docs, 1):
             meta          = doc.meta or {}
             fname         = meta.get("filename", "<unknown>")
+            spec          = meta.get("spec_id")
+            label         = f"{fname} ({spec} {meta.get('edition')})" if spec else fname
             page          = meta.get("page", "N/A")
             heading       = meta.get("heading", "")
             has_diagram   = meta.get("has_diagram", False)
             diagram_paths = meta.get("diagram_paths", [])
 
-            print(f"=== [Hybrid {i}] Page: {page} | Doc: {fname} ===")
+            print(f"=== [Hybrid {i}] Page: {page} | Doc: {label} ===")
             if heading:
                 print(f"🔖 Section: {heading}")
             if has_diagram and diagram_paths:
@@ -330,7 +362,6 @@ def search_specs(
     )
     elapsed = (time.time() - t0) * 1000
 
-    filter_info = " [FILTER: Diagrams Only]" if diagrams_only else ""
     print(f"\n[QUERY] '{query_text}'{filter_info}")
     print(f"[SEARCH] Dense Prefetch ({prefetch_limit}) + ColBERT MaxSim Rescore -> "
           f"Top {colbert_k} fetched, {top_k} displayed ({elapsed:.1f}ms)\n")
@@ -356,13 +387,16 @@ def search_specs(
         payload = doc.meta or {}
         doc_id        = payload.get("doc_id", "Unknown")
         filename      = payload.get("filename", "")
+        spec          = payload.get("spec_id")
+        label         = (f"{filename or doc_id} ({spec} {payload.get('edition')})"
+                         if spec else (filename or doc_id))
         page          = payload.get("page", "N/A")
         heading       = payload.get("heading", "")
         text          = (doc.content or "").strip()
         has_diagram   = payload.get("has_diagram", False)
         diagram_paths = payload.get("diagram_paths", [])
 
-        print(f"=== [Result {i}] Page: {page} | Doc: {filename or doc_id} ===")
+        print(f"=== [Result {i}] Page: {page} | Doc: {label} ===")
         if heading:
             print(f"🔖 Section: {heading}")
         if has_diagram and diagram_paths:
@@ -406,6 +440,10 @@ def main():
         help="Filter results to only passages containing architectural diagrams/charts",
     )
     parser.add_argument(
+        "--all-editions", action="store_true",
+        help="Also retrieve superseded editions of a spec (default: current edition only)",
+    )
+    parser.add_argument(
         "--use-bm25", action="store_true",
         help="Hybrid retrieval: dense + sparse BM25 fused server-side by Qdrant (RRF)",
     )
@@ -436,6 +474,7 @@ def main():
         top_k=args.top_k,
         prefetch_limit=args.prefetch,
         diagrams_only=args.diagrams_only,
+        current_only=not args.all_editions,
         use_bm25=args.use_bm25,
         answer_context=args.answer_context,
         per_doc=args.per_doc,

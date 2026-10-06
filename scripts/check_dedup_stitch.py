@@ -106,9 +106,26 @@ same_img = _dedup_docs([SimpleDoc(img_a + mid + "AAA", {"doc_id": "MEC003"}),
                         SimpleDoc(img_a + mid + "BBB", {"doc_id": "MEC003"})], keep=5, per_doc=2)
 assert len(same_img) == 2, "differing text after the window must keep both excerpts"
 
+# The per-doc quota is spent per document, not per filename: 52 of this corpus's doc_ids are
+# byte-identical copies of another spec, and each alias would otherwise claim its own quota.
+md5_a = {"doc_id": "MEC004", "content_md5": "cf00"}
+md5_b = {"doc_id": "MEC088", "content_md5": "cf00"}
+aliases = _dedup_docs([SimpleDoc("aa bb", md5_a), SimpleDoc("cc dd", md5_b)], keep=5, per_doc=1)
+assert len(aliases) == 1, "two aliases of one file share a per_doc quota"
+both = _dedup_docs([SimpleDoc("aa bb", md5_a), SimpleDoc("cc dd", {"doc_id": "MEC088",
+                                                                "content_md5": "8241"})],
+                   keep=5, per_doc=1)
+assert len(both) == 2, "different content_md5 means different documents"
+# Unstamped chunks (before scripts/backfill_spec_identity.py, or from a future collection)
+# must still bucket by doc_id, and an empty content_md5 must not swallow that fallback.
+unstamped = _dedup_docs([SimpleDoc("aa bb", {"doc_id": "MEC004"}),
+                         SimpleDoc("cc dd", {"doc_id": "MEC088", "content_md5": ""})],
+                        keep=5, per_doc=1)
+assert len(unstamped) == 2, "no content_md5 falls back to doc_id"
+
 print("[check] _dedup_docs: default, per_doc, keep cap, cross-id collapse, 400-char window,")
 print("[check]               no-doc_id prefix bucketing, per_doc clamp, keep < 1,")
-print("[check]               strip-before-window order — OK")
+print("[check]               strip-before-window order, content_md5 alias quota — OK")
 
 
 def _parts(doc_id, page, chunk_part, total_parts, text):

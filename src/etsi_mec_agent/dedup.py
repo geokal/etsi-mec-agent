@@ -47,9 +47,10 @@ def _dedup_docs(docs: list, keep: int, per_doc: int = 1) -> list:
     stored under different doc_ids, which is common in this corpus because each PDF
     extraction embeds a different image path in the markdown.
 
-    Pass 2 — up to `per_doc` excerpts per doc_id, `keep` results overall. A hit with no
-    doc_id is bucketed by the first 40 chars of its text instead, so two different
-    documents sharing such a prefix consume one `per_doc` quota together. per_doc=1
+    Pass 2 — up to `per_doc` excerpts per document, `keep` results overall. A document is
+    the chunk's `content_md5` when stamped, else its `doc_id`, and a hit with neither falls
+    back to the first 40 chars of its text, so two documents sharing such a prefix consume
+    one `per_doc` quota together. per_doc=1
     reproduces the historical one-chunk-per-document rule; larger values let a
     document contribute more than its single best-ranked page.
     """
@@ -77,11 +78,13 @@ def _dedup_docs(docs: list, keep: int, per_doc: int = 1) -> list:
     unique = []
     for doc in after_text:
         meta = doc.meta or {}
-        doc_id = meta.get("doc_id", "") or (doc.content or "")[:40]
-        n = counts.get(doc_id, 0)
+        # content_md5 is the document; doc_id is only a filename, and 52 of this corpus's
+        # doc_ids are byte-identical copies of another spec stored under a wrong name.
+        bucket = meta.get("content_md5") or meta.get("doc_id", "") or (doc.content or "")[:40]
+        n = counts.get(bucket, 0)
         if n >= per_doc:
             continue
-        counts[doc_id] = n + 1
+        counts[bucket] = n + 1
         unique.append(doc)
         if len(unique) >= keep:
             break
