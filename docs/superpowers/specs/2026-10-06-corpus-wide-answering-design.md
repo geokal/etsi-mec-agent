@@ -113,6 +113,57 @@ count equals unique-document count (no alias documents), `is_current` true for e
 per `spec_id`, and eval `aggregate` recall ≥ 12/16 with every cited `spec_id` verifiably containing
 the quoted text.
 
+## 5b. Result of A, measured 2026-10-06
+
+`uv run python scripts/eval_rag.py --top-k 5` on the live collection:
+`recall@5: colbert=10/16 (62%)  hybrid=10/16 (62%)   aggregate@15: 11/16 (69%)`.
+
+A gained q03 (which the hybrid path missed) and lost q11, because the aggregate column is built on
+the hybrid path and cannot rank what that path never retrieves. Union across the three columns is
+still 12/16. **The acceptance bar was not met:** q06, q08, q12 and q14 remain MISS under all three.
+
+Corpus scan of those four explains why, and it is not a ranking problem:
+
+- **q12 is bad golden data.** Its keyword `Mm5` occurs in **56** chunks, so any of them "passes"
+  evidence while no ranking can single out the selection API. The question needs a discriminating
+  keyword before it can measure anything.
+- **q06 / q08 / q14: evidence is fragmented or mislabelled.** 14, 8 and 51 chunks contain their
+  keywords; the strongest matches are page fragments (`MEC003 p23 part 1/2`, `MEC070 p26 part 1/2`,
+  `MEC083 p54 part 2/3`) or belong to documents whose `doc_id` names a different spec (MEC070 is a
+  copy of GS MEC 003 V4.1.1). This is B1 (identity) and B2 (row-group chunks), not a wider `k`.
+- The scan also found `MEC021 p14 part 3/3` holding **14 words** — the degenerate tail chunk
+  predicted from `chunk_page_text`'s slicing, confirming B2.
+
+Conclusion: A improved the shape of what is retrieved (ranks and complete passages) and one net
+hit, and the four stubborn misses are precisely the ones B targets. B proceeds, with q12 rewritten
+first so the next measurement is honest.
+
+## 5c. End-to-end proof (`--answer`), run 2026-10-06
+
+`uv run python -m etsi_mec_agent.search "Which reference point connects the MEC platform to the MEC
+orchestrator?" --use-bm25 --answer --answer-context 15 --per-doc 2` printed
+`[ANSWER CONTEXT] 15 excerpts, up to 2 per document (~5169 words), 9 page-part group(s) merged`, and
+every reference-point row arrived whole — the pre-change run's `|Mm9:|The Mm9 reference` truncation is
+gone. **A's last acceptance clause passes.**
+
+The answer is still wrong, and the cause is B1, not A. It says **Mm5** and justifies it with "the MEC
+orchestrator (referred to as the MEC Platform Manager in ETSI GS MEC 003)". The corpus contradicts that
+in every edition it holds: `Mm3` = MEO ↔ MEC platform manager, `Mm5` = MEC platform manager ↔ MEC
+platform (read from the stored payloads at `MEC003` p16, `gs_MEC_003_v2.2.1` p15, `MEC070` p17–18). No
+edition defines a platform↔orchestrator reference point, so the defensible answer is "none — management
+reaches the platform through the platform manager".
+
+Why the model could not tell them apart: four of the five shown excerpts are the *same table* taken from
+**three editions across four `doc_id`s** — `MEC003` (V3.1.1), `gs_MEC_003_v2.2.1` (V2.2.1), and
+`MEC023` + `MEC070`, which md5 identically (`cf0052ad…`) and are both GS MEC 003 **V4.1.1** under
+filenames that name other specs. `--per-doc` caps by `doc_id`, so byte-identical documents stored under
+different names each claim their own slots; the 15-excerpt budget is spent on near-duplicate tables and
+the one distinguishing row is outvoted by three differently-worded copies. This is B1 (spec identity:
+dedupe by content, one `is_current` edition per `spec_id`) showing up as a wrong answer rather than as
+a low recall number.
+
+---
+
 ## 6. Out of scope here
 
 - Replacing the parser with Docling/unstructured (approach C): new heavy dependencies on a 16 GB
