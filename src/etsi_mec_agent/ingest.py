@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import os
 import re
 import sys
@@ -7,6 +8,7 @@ import uuid
 from pathlib import Path
 from typing import List
 
+import pymupdf
 import pymupdf4llm
 from fastembed import LateInteractionTextEmbedding, TextEmbedding
 from qdrant_client.models import PointStruct
@@ -56,6 +58,95 @@ def chunk_page_text(text: str, max_words: int = 300, overlap: int = 40) -> List[
             chunks.append(" ".join(sub_words))
     return chunks
 
+_SEEN_IMAGE_HASHES: set = set()   # module-level: dedupes boilerplate images across all PDFs in one run
+
+
+def _image_is_worth_keeping(path: Path) -> bool:
+    """Return False (and delete the file) for blank, sub-200px, or byte-duplicate images."""
+    from PIL import Image  # lazy import: Pillow arrives via fastembed
+
+    keep = False
+    try:
+        with Image.open(path) as im:
+            lo, hi = im.convert("L").getextrema()
+            keep = im.width >= 200 and im.height >= 200 and (hi - lo) > 5
+    except Exception:
+        keep = False
+    if keep:
+        digest = hashlib.md5(path.read_bytes()).hexdigest()
+        if digest in _SEEN_IMAGE_HASHES:
+            keep = False
+        else:
+            _SEEN_IMAGE_HASHES.add(digest)
+    if not keep:
+        path.unlink(missing_ok=True)
+    return keep
+
+
+def _prune_bad_image_refs(text: str, diagrams_dir: Path) -> str:
+    """Drop markdown image refs whose files were discarded by the quality filter."""
+
+    def _keep(m):
+        ref = Path(m.group(1))
+        p = ref if ref.is_absolute() else diagrams_dir / ref.name
+        return m.group(0) if _image_is_worth_keeping(p) else ""
+
+    return re.sub(r"!\[.*?\]\((.*?)\)", _keep, text)
+
+def _figure_size_ok(rect, page_rect) -> bool:
+    if rect.width < 100 or rect.height < 60:
+        return False  # rules, bullets, text-fragment clusters
+    if rect.width > 0.95 * page_rect.width and rect.height > 0.95 * page_rect.height:
+        return False  # page-spanning frames / watermarks
+    return True
+
+
+def _merged_tile_groups(page) -> list:
+    """Bboxes of 2+ adjacent raster images: a big figure that pymupdf4llm
+    exports as separate strips becomes one renderable rectangle again."""
+    boxes = sorted(
+        (pymupdf.Rect(im["bbox"]) for im in page.get_image_info()),
+        key=lambda r: (r.y0, r.x0),
+    )
+    groups: list = []  # each: [rect, tile_count]
+    for b in boxes:
+        grown = pymupdf.Rect(b.x0 - 5, b.y0 - 5, b.x1 + 5, b.y1 + 5)
+        if groups and grown.intersects(groups[-1][0]):
+            groups[-1][0] |= b
+            groups[-1][1] += 1
+        else:
+            groups.append([pymupdf.Rect(b), 1])
+    return [g[0] for g in groups if g[1] > 1]
+
+
+# ponytail: cluster_drawings also matches vector table grids, which pass as "figures";
+# upgrade path is Docling's figure/table classification if the noise matters.
+def render_vector_figures(pdf_path: Path, diagrams_dir: Path) -> dict:
+    """Render each page's vector-drawing clusters and fragmented raster tile
+    groups as whole PNGs.
+
+    pymupdf4llm's write_images only exports embedded rasters, so ETSI's
+    vector-drawn architecture diagrams (MEC002/003 reference models) need
+    this separate render pass; large raster figures that arrive as stacked
+    strips are re-merged into one image. Returns {page_number: [png paths]}.
+    """
+    figures: dict = {}
+    doc = pymupdf.open(str(pdf_path))
+    try:
+        for pno in range(len(doc)):
+            page = doc[pno]
+            pr = page.rect
+            rects = [r for r in page.cluster_drawings() if _figure_size_ok(r, pr)]
+            rects += [r for r in _merged_tile_groups(page) if _figure_size_ok(r, pr)]
+            for idx, rect in enumerate(rects):
+                out = diagrams_dir / f"{pdf_path.name}-{pno + 1:04d}-fig-{idx:02d}.png"
+                page.get_pixmap(dpi=200, clip=rect).save(str(out))
+                if _image_is_worth_keeping(out):
+                    figures.setdefault(pno + 1, []).append(str(out))
+    finally:
+        doc.close()
+    return figures
+
 
 def ingest_single_pdf(
     pdf_path: Path,
@@ -89,6 +180,7 @@ def ingest_single_pdf(
             print(f"    [SKIP] {pdf_path.name} already indexed ({doc_name}). Use --recreate-index to force.", flush=True)
             return 0
 
+    vector_figs: dict = {}
     if extract_diagrams:
         diagrams_dir = Path(settings.diagrams_dir)
         diagrams_dir.mkdir(parents=True, exist_ok=True)
@@ -107,6 +199,11 @@ def ingest_single_pdf(
         except Exception as e:
             print(f"    [ERROR] Failed parsing {pdf_path.name} with PyMuPDF: {e}", flush=True)
             return 0
+        if not dry_run:
+            vector_figs = render_vector_figures(pdf_path, diagrams_dir)
+            n_vec = sum(len(v) for v in vector_figs.values())
+            if n_vec:
+                print(f"    Rendered {n_vec} vector figure(s) from drawing clusters.", flush=True)
     else:
         print(f"    Extracting Markdown (text-only) with PyMuPDF4LLM across {pdf_path.name}...", flush=True)
         try:
@@ -128,10 +225,17 @@ def ingest_single_pdf(
         page_num = page_meta.get("page_number", page_meta.get("page", 0) + 1)
         heading = extract_primary_heading(raw_text)
 
+        if extract_diagrams and not dry_run:
+            raw_text = _prune_bad_image_refs(raw_text, diagrams_dir)
+        vec_paths = vector_figs.get(page_num, [])
+
         # Ensure passages stay within ColBERT token limit (max 300 words)
         sub_chunks = chunk_page_text(raw_text, max_words=300, overlap=40)
         for sub_idx, sub_text in enumerate(sub_chunks, 1):
             diagram_paths = re.findall(r'!\[.*?\]\((.*?)\)', sub_text)
+            if sub_idx == 1:
+                # page-level vector renders attach once, not to every sub-chunk
+                diagram_paths = diagram_paths + vec_paths
             has_diagram = len(diagram_paths) > 0
 
             texts_to_embed.append(sub_text)
