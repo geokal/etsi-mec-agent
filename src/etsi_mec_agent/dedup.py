@@ -101,8 +101,8 @@ def _stitch_parts(docs: list) -> list:
     A run that ends up holding one excerpt passes through as the caller's own object:
     points with no usable part metadata, whole pages (total_parts <= 1), and a part whose
     siblings were simply never retrieved. Merged runs come back as SimpleDoc, so the
-    returned list mixes both types — a consumer that reads a wrapper attribute
-    (search.py's `_HitDoc._hit`) must handle that.
+    returned list mixes both types — read `.content` and `.meta`, which every element
+    provides, rather than assuming one class.
     """
     runs = []
     open_run = {}              # (doc_id, page) -> run that still accepts the next part
