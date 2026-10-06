@@ -57,7 +57,8 @@ def _dedup_docs(docs: list, keep: int, per_doc: int = 1) -> list:
     # already >= it); clamp here rather than in argparse for every caller.
     per_doc = max(1, per_doc)
     # keep < 1 must mean "no results": the loop below appends before it checks the cap,
-    # so without this guard it hands back one excerpt. search.py's --top-k is unvalidated.
+    # so without this guard it hands back one excerpt. search.py's CLI rejects --top-k < 1, but
+    # scripts/eval_rag.py still passes its own --top-k straight through as `keep`.
     if keep < 1:
         return []
     seen_text = set()

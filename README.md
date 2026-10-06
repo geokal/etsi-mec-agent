@@ -57,11 +57,19 @@ Query: "Explain the role of Mp1 in MEC"
 │   query token    │   │  ↓ RRF fusion inside Qdrant  │
 └────────┬─────────┘   └──────────────┬───────────────┘
          ▼                             ▼
-    Top 5 chunks            top_k×6 candidates (30 with --top-k 5)
+    fetch_k chunks          fetch_k×6 candidates (30 without --answer,
+                                                    90 with it, --top-k 5)
+        fetch_k = max(--top-k, --answer-context) — 5 or 15 by default
+                                    │
+                                    ▼   (PATH A takes the same two steps)
+                    _stitch_parts(): contiguous parts of one page —
+                    "chunk_part 1 of 2" + "2 of 2" come back as one excerpt
                                     │
                                     ▼
-                  _dedup_docs(): text fingerprint, then
-                  one chunk per doc_id, capped at top_k
+             _dedup_docs() twice over that stitched list: text fingerprint,
+             then keep=--top-k (one excerpt per doc_id) for the terminal
+             print, and with --answer keep=--answer-context,
+             per_doc=--per-doc for the prompt
 ```
 
 | | `dense` | `colbert` | `sparse` | diagrams |
@@ -91,7 +99,9 @@ Query: "Explain the role of Mp1 in MEC"
 - **Vector Database**: [Qdrant](https://qdrant.tech/) running via official Docker container.
 - **PDF Monitor**: `tools/monitor_deliver.py` polls Exa for new ETSI PDF releases and downloads them automatically.
 - **Exa Search**: `tools/exa_search.py` calls the Exa API directly (no third-party SDK) to locate official ETSI deliver PDFs.
-- **Retrieval Eval**: `scripts/eval_rag.py` scores recall@k for both retrieval paths against golden questions, with a corpus evidence pre-check.
+- **Rank Shaping**: `src/etsi_mec_agent/dedup.py` — `_stitch_parts()` merges contiguous parts of one page, `_dedup_docs()` applies the text fingerprint and the per-document cap. Stdlib-only, so `scripts/check_dedup_stitch.py` asserts on it without loading the ONNX embedders.
+- **Retrieval Eval**: `scripts/eval_rag.py` scores recall@k for both retrieval paths against golden questions, with a corpus evidence pre-check, and reports the rank inside the wider `--answer` evidence budget as an `aggregate` column.
+- **Corpus Audit**: `scripts/audit_specs.py` hashes `data/specs/*.pdf`, reads each PDF's own title page, and reports manifest keys that do not name the document they point at, URLs it cannot verify, and spec numbers never fetched.
 - **Schema Migration**: `scripts/migrate_add_sparse.py` adds a named vector to an existing collection by copying points, because Qdrant 1.19 cannot add named vectors in place.
 - **LLM Answers**: OpenRouter's OpenAI-compatible endpoint, model ID `openrouter/free`, reasoning chain optional.
 - **Package Manager**: [uv](https://github.com/astral-sh/uv) on Python 3.12.
@@ -150,8 +160,10 @@ uv run python -m etsi_mec_agent.search "What is the Mp1 reference point?"
 
 Other flags: `--use-bm25` (dense + sparse hybrid fused inside Qdrant), `--answer`
 (LLM synthesis via OpenRouter), `--stream`, `--show-reasoning`, `--diagrams-only`,
-`--top-k N`, `--prefetch N`. Retrieval alone loads only the local ONNX embedders; no
-API call leaves the machine unless `--answer` is used.
+`--top-k N` (excerpts printed in the terminal), `--answer-context N` (excerpts the LLM reads,
+default 15), `--per-doc N` (excerpts per document inside that budget, default 2),
+`--prefetch N`. `--top-k`, `--answer-context` and `--per-doc` are rejected below 1. Retrieval
+alone loads only the local ONNX embedders; no API call leaves the machine unless `--answer` is used.
 
 ---
 
@@ -209,7 +221,10 @@ uv run python -m etsi_mec_agent.search "Summarize security requirements in MEC00
 ```powershell
 uv run python scripts/eval_rag.py --top-k 5
 ```
-Prints the rank at which each golden question is answered under both paths, plus recall@k.
+Prints the rank at which each golden question is answered under both retrieval paths, plus the
+`aggregate` column — the same hybrid path shaped like the `--answer` evidence budget (stitched
+parts, `--per-doc` excerpts per doc) and measured over 3×`--top-k` — and reports recall@k next to
+the aggregate recall.
 A question flagged `EVIDENCE-MISSING` is bad golden data — its keyword does not occur in the
 expected document — and is excluded from the denominator, so recall reflects retrieval only.
 
@@ -239,10 +254,12 @@ text. One request, one answer.
 
 Worth knowing before trusting an aggregation-style question:
 
-- **One chunk per document.** `_dedup_docs()` keeps only the top-ranked chunk for each `doc_id`
-  and stops at `top_k`. With the default `--top-k 5` the model reads at most 5 excerpts
-  (~1,500 words) out of ~4.7k chunks, so extra pages of the spec that actually holds the answer
-  are discarded on purpose (the dedup exists to stop one spec monopolising the slots).
+- **Two budgets, not one.** The terminal prints at most `--top-k` excerpts (default 5), one per
+  `doc_id` — the rule that stops one spec monopolising the slots. `--answer` reads a separate
+  evidence set over the same stitched list: up to `--answer-context` excerpts (default 15), with
+  up to `--per-doc` (default 2) from any one document. Parts of a page that the 300-word window
+  split are merged before either budget, so a table reaches the prompt whole instead of losing its
+  continuation to the one-slot-per-document display rule.
 - **Paths, not pixels.** Diagram filenames go into the prompt; no image bytes are sent, so the
   model can cite a figure but cannot read it.
 - **One query, one pass.** No sub-question decomposition and no second retrieval round over what
@@ -252,8 +269,10 @@ Worth knowing before trusting an aggregation-style question:
   V2.2.1 / V3.1.1 / V4.1.1) are indexed together, so a citation can name a spec the text does not
   belong to, or quote a superseded edition.
 
-Raising `--top-k` buys more evidence but not better synthesis; cross-document aggregation needs
-row/clause-aware chunking, a multi-chunk-per-document allowance, and a map-reduce pass.
+Raising `--top-k` buys more printed excerpts, not better synthesis; `--answer-context` and
+`--per-doc` buy evidence. Cross-document aggregation still needs row/clause-aware chunking and a
+map-reduce pass — the multi-chunk-per-document allowance this section used to ask for is
+`--per-doc` today.
 
 ---
 
