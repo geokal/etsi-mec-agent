@@ -36,12 +36,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from etsi_mec_agent.config import settings
+from etsi_mec_agent.dedup import _IMG_RE
 from etsi_mec_agent.store import get_qdrant_client
 
-# Strips markdown image references before fingerprinting so that
-# "![](MEC059.pdf-0035-02.png)" vs "![](MEC079.pdf-0035-02.png)"
-# don't produce different fingerprints for identical text.
-_IMG_RE = re.compile(r'!\[.*?\]\(.*?\)')
+# _IMG_RE is shared with etsi_mec_agent.dedup: it strips markdown image references so that
+# "![](MEC059.pdf-0035-02.png)" vs "![](MEC079.pdf-0035-02.png)" don't produce different
+# fingerprints for identical text. The fingerprint below is still deliberately this script's
+# own (600 chars + whitespace normalisation) because it drives a destructive pass.
 _MEC_RE = re.compile(r'^MEC\d{3}\.pdf$', re.IGNORECASE)
 
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from etsi_mec_agent.dedup import SimpleDoc, _stitch
+from etsi_mec_agent.dedup import SimpleDoc, _dedup_docs, _stitch
 
 # The attribute contract `generate_answer` and `_dedup_docs` will code against.
 d = SimpleDoc("t", {"doc_id": "MEC003"})
@@ -46,8 +46,6 @@ assert _stitch("x", "") == "x"
 print("[check] _stitch: ingest 40-word round-trip, trim, concat, degenerate tail,")
 print("[check]         single-token kept, empty input; SimpleDoc attr contract — OK")
 
-from etsi_mec_agent.dedup import _dedup_docs
-
 
 def _docs(specs):
     """specs: list of (doc_id, text) -> SimpleDoc list"""
@@ -63,12 +61,33 @@ two = _dedup_docs(_docs([("MEC003", "aa bb"), ("MEC003", "dd ee"), ("MEC003", "f
                          ("MEC030", "hh ii")]), keep=5, per_doc=2)
 assert [d.meta["doc_id"] for d in two] == ["MEC003", "MEC003", "MEC030"], two
 
-# keep still wins over per_doc.
-capped = _dedup_docs(_docs([("MEC003", "aa"), ("MEC003", "bb"), ("MEC003", "cc")]), keep=2, per_doc=2)
+# keep still wins over per_doc: 4 excerpts of one doc, where per_doc alone would allow 3.
+capped = _dedup_docs(_docs([("MEC003", "aa"), ("MEC003", "bb"), ("MEC003", "cc"),
+                            ("MEC003", "dd")]), keep=2, per_doc=3)
 assert len(capped) == 2, capped
 
 # Identical text under two doc_ids collapses (this is what hides the mislabelled copies).
 same = _dedup_docs(_docs([("MEC003", "xx yy zz"), ("MEC070", "xx yy zz")]), keep=5)
 assert len(same) == 1, same
 
-print("[check] _dedup_docs: default, per_doc, keep cap, cross-id text collapse — OK")
+# The 400-char fingerprint window, characterised as it behaves today: two excerpts of one
+# doc that share a prefix longer than the window collapse in pass 1, so per_doc never gets
+# to keep the second one (see the ceiling marked in _dedup_docs).
+head = " ".join(f"t{i}" for i in range(120))  # 489 chars, i.e. longer than the window
+shared = _dedup_docs(_docs([("MEC003", head + " AAA"), ("MEC003", head + " BBB")]), keep=5, per_doc=2)
+assert len(shared) == 1, shared
+
+# No doc_id: the fallback key is the first 40 chars of the text, so two hits sharing that
+# prefix but differing later burn a single quota while a distinct text keeps its own.
+noid = _dedup_docs([SimpleDoc("F" * 40 + " AAA", {}), SimpleDoc("F" * 40 + " BBB", {}),
+                    SimpleDoc("some text", {})], keep=5)
+assert [d.content for d in noid] == ["F" * 40 + " AAA", "some text"], noid
+
+# per_doc is clamped at the trust boundary: 0 and negatives behave exactly like 1.
+sample = _docs([("MEC003", "aa bb cc"), ("MEC003", "dd ee ff"), ("MEC030", "gg")])
+for bad in (0, -5):
+    got = _dedup_docs(sample, keep=5, per_doc=bad)
+    assert [d.meta["doc_id"] for d in got] == ["MEC003", "MEC030"], (bad, got)
+
+print("[check] _dedup_docs: default, per_doc, keep cap, cross-id collapse, 400-char window,")
+print("[check]               no-doc_id prefix bucketing, per_doc clamp — OK")
