@@ -30,6 +30,7 @@ src/etsi_mec_agent/
   store.py           # Qdrant client + ensure_collection()
   ingest.py          # PDF → chunks → embed → upsert  (CLI: uv run python -m etsi_mec_agent.ingest)
   search.py          # hybrid search + LLM answer       (CLI: uv run python -m etsi_mec_agent.search)
+  dedup.py           # rank shaping (stitch + dedup) — must stay stdlib-only, so scripts/check_dedup_stitch.py runs without ONNX
   agent.py           # monitor entrypoint
   tools/
     clip_embed.py    # CLIP image embedder (CPU-safe, lazy-loads)
@@ -40,7 +41,9 @@ src/etsi_mec_agent/
 scripts/
   backfill_clip.py          # add 'clip' vectors to existing collection (no re-ingest)
   deduplicate_collection.py # remove duplicate chunks in-place (no re-embed)
-  eval_rag.py               # golden-question recall@k for both retrieval paths
+  audit_specs.py            # report data/specs files and manifest keys naming the wrong spec
+  check_dedup_stitch.py     # asserts for dedup.py; no models, no Qdrant
+  eval_rag.py               # golden-question recall@k, both paths + the --answer budget
   migrate_add_sparse.py     # copy points into a new collection that has 'sparse' (no re-embed)
   graph_visualize.py        # force-directed spec relationship graph
 
@@ -93,7 +96,7 @@ uv run python -m etsi_mec_agent.search "Mm4 role" --use-bm25 --answer --show-rea
 uv run python scripts/deduplicate_collection.py --dry-run
 uv run python scripts/deduplicate_collection.py
 
-# Golden-question retrieval eval (recall@k, dense+colbert vs server hybrid)
+# Golden-question retrieval eval (recall@k for both paths + the --answer budget)
 uv run python scripts/eval_rag.py --top-k 5
 
 # Visualise spec relationships
@@ -111,7 +114,9 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
 | `--stream` | Stream LLM answer token-by-token |
 | `--show-reasoning` | Print model thinking chain (non-stream only) |
 | `--diagrams-only` | Filter to chunks with extracted diagrams |
-| `--top-k N` | Results to return (default 5) |
+| `--top-k N` | Excerpts printed in the terminal (default 5) |
+| `--answer-context N` | Excerpts handed to the LLM with `--answer` (default 15; the terminal still prints `--top-k`) |
+| `--per-doc N` | Excerpts per document inside `--answer-context` (default 2) — all three rejected below 1 |
 
 ---
 
@@ -119,6 +124,7 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
 
 - **Three named vectors per point**: `dense` (384-dim Cosine, global recall) + `colbert` (128-dim Dot MaxSim on_disk, precision re-rank) + `sparse` (crc32-hashed raw term frequencies, `Modifier.IDF` applied server-side). `dense` + `sparse` feed the hybrid query; `colbert` feeds the re-rank path.
 - **`--use-bm25` does NOT use Haystack** — the collection was created outside Haystack and `QdrantDocumentStore` rejects it. Fusion happens inside Qdrant: `search.py::_run_hybrid_retrieval` sends two `Prefetch`es plus `FusionQuery(fusion=models.Fusion.RRF)`. `Fusion.RRF` is an enum member — passing it called (`RRF()`) raises `TypeError: 'Fusion' object is not callable`.
+- **Display and evidence are two budgets.** `search_specs` prints `_dedup_docs(stitched, keep=--top-k)` (one excerpt per `doc_id`) and hands the LLM `_dedup_docs(stitched, keep=--answer-context, per_doc=--per-doc)` over the same stitched list. A page the 300-word window splits is stored as `chunk_part 1 of 2` / `2 of 2`, so `_stitch_parts()` runs first: one chunk per document used to discard the continuation and hand the LLM a table ending mid-cell.
 - **`openrouter/free`** is the correct model ID for the free-tier routing endpoint. Do not change it to a specific model ID unless the user requests a pinned model.
 - **`has_diagram` index** is `PayloadSchemaType.BOOL` — an older collection has it as `KEYWORD` (bug, pre-fix). Recreating the index fixes it.
 - **batch_size=16** in `ingest.py` — safe for 16 GB RAM with 300-word chunks. Do not lower without a good reason.
