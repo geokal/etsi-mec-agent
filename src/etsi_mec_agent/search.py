@@ -237,6 +237,10 @@ def search_specs(
     # The LLM reads more than the terminal prints: retrieval must fetch enough
     # candidates to fill the evidence budget after stitching and dedup.
     fetch_k = max(top_k, answer_context) if generate else top_k
+    # A page's sibling part has to be in the list at all before it can merge, and ColBERT
+    # rescore returns exactly `limit` results with no post-filter slack: over-fetch first,
+    # stitch, then let dedup pick the display and evidence budgets (as the hybrid branch does).
+    colbert_k = fetch_k * 3 if generate else fetch_k
     # The dense prefetch is the rerank pool and therefore the ceiling on how many excerpts
     # ColBERT can rescore: a bigger evidence budget needs a bigger pool. The budget is 15
     # excerpts while the display is 5, and _stitch_parts can only merge parts that were
@@ -321,7 +325,7 @@ def search_specs(
         ),
         query=query_colbert,
         using="colbert",
-        limit=fetch_k,
+        limit=colbert_k,
         query_filter=query_filter,
     )
     elapsed = (time.time() - t0) * 1000
@@ -329,7 +333,7 @@ def search_specs(
     filter_info = " [FILTER: Diagrams Only]" if diagrams_only else ""
     print(f"\n[QUERY] '{query_text}'{filter_info}")
     print(f"[SEARCH] Dense Prefetch ({prefetch_limit}) + ColBERT MaxSim Rescore -> "
-          f"Top {fetch_k} fetched, {top_k} displayed ({elapsed:.1f}ms)\n")
+          f"Top {colbert_k} fetched, {top_k} displayed ({elapsed:.1f}ms)\n")
 
     if not results.points:
         print("No matching documents found.")
