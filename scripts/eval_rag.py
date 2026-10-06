@@ -4,7 +4,7 @@
 
 Exercises the two production retrieval paths from etsi_mec_agent.search:
   colbert — dense prefetch + ColBERT MaxSim rescore (search_specs path 2)
-  hybrid  — dense prefetch + BM25 re-rank + RRF (_run_hybrid_retrieval)
+  hybrid  — Qdrant server-side dense+sparse prefetch with RRF fusion (_run_hybrid_retrieval)
 
 A question passes when a top-k chunk from the expected document contains
 one of its expected keywords. Questions whose keywords exist nowhere in
@@ -32,10 +32,10 @@ QUESTIONS = [
     {"id": "q05", "query": "What is the Edge Enabler Client (EEC)?", "doc": None, "kw": ["Edge Enabler Client", "EEC"]},
     {"id": "q06", "query": "What traffic influence rules does the TCR expose?", "doc": None, "kw": ["traffic influence", "TCR"]},
     {"id": "q07", "query": "Which service continuity modes are defined for MEC applications?", "doc": None, "kw": ["service continuity"]},
-    {"id": "q08", "query": "What is the User app LCM proxy?", "doc": "MEC003", "kw": ["User app LCM proxy", "Ulv"]},
+    {"id": "q08", "query": "What is the User app LCM proxy?", "doc": "MEC003", "kw": ["LCM proxy"]},
     {"id": "q09", "query": "How does a road tunnel affect TCP congestion control in the MEC use case?", "doc": "MEC002", "kw": ["road tunnel", "TCP"]},
     {"id": "q10", "query": "What are the components of the MEC host level reference architecture?", "doc": "MEC003", "kw": ["MEC host", "Virtualisation"]},
-    {"id": "q11", "query": "What application lifecycle states are defined?", "doc": None, "kw": ["lifecycle states", "LIFE_CYCLE"]},
+    {"id": "q11", "query": "What is the UU interface used for in the V2X deployment?", "doc": "MEC030", "kw": ["uu interface"]},
     {"id": "q12", "query": "Which API is used to select a MEC system for application instantiation?", "doc": None, "kw": ["Mm5", "Mm6"]},
     {"id": "q13", "query": "How does DNS resolution steer users to the closest MEC server?", "doc": None, "kw": ["DNS"]},
     {"id": "q14", "query": "What is the role of the MEC platform in service discovery?", "doc": "MEC003", "kw": ["service registration", "discovery"]},

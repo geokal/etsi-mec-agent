@@ -1,6 +1,7 @@
 import argparse
 import os
 import time
+import zlib
 
 from fastembed import LateInteractionTextEmbedding, TextEmbedding
 from qdrant_client import models
@@ -16,10 +17,9 @@ def get_embedders():
 
 
 # ---------------------------------------------------------------------------
-# Hybrid retrieval — Dense prefetch + BM25 re-rank (no Haystack required)
+# Hybrid retrieval — dense + server-side sparse BM25 (no Haystack required)
 # ---------------------------------------------------------------------------
 
-import math
 import re as _re
 
 
@@ -27,30 +27,15 @@ def _tokenize(text: str) -> list[str]:
     """Lowercase, strip punctuation, split into word tokens."""
     return _re.findall(r"[a-z0-9]+", text.lower())
 
-
-def _bm25_score(query_tokens: list[str], doc_tokens: list[str],
-                avg_dl: float, k1: float = 1.5, b: float = 0.75,
-                corpus_size: int = 100) -> float:
-    """
-    Score one document against a tokenised query using BM25.
-    IDF is approximated as log((N - df + 0.5) / (df + 0.5) + 1)
-    where N = corpus_size and df = 1 (single-doc IDF estimate).
-    """
-    tf_map: dict[str, int] = {}
-    for tok in doc_tokens:
-        tf_map[tok] = tf_map.get(tok, 0) + 1
-
-    dl = len(doc_tokens)
-    score = 0.0
-    for qt in set(query_tokens):
-        tf = tf_map.get(qt, 0)
-        if tf == 0:
-            continue
-        idf = math.log((corpus_size - 1 + 0.5) / (1 + 0.5) + 1)
-        numerator = tf * (k1 + 1)
-        denominator = tf + k1 * (1 - b + b * dl / max(avg_dl, 1))
-        score += idf * (numerator / denominator)
-    return score
+def _token_sparse(text: str) -> models.SparseVector:
+    """Raw term-frequency sparse vector; token ids are crc32 hashes so no shared
+    vocabulary file is needed between ingest and query time. Qdrant applies IDF
+    weighting at query time via Modifier.IDF on the collection config."""
+    tf: dict[int, int] = {}
+    for tok in _tokenize(text):
+        i = zlib.crc32(tok.encode()) & 0x7FFFFFFF
+        tf[i] = tf.get(i, 0) + 1
+    return models.SparseVector(indices=list(tf), values=[float(v) for v in tf.values()])
 
 
 def _run_hybrid_retrieval(
@@ -62,79 +47,39 @@ def _run_hybrid_retrieval(
     query_filter=None,
 ) -> list:
     """
-    True hybrid retrieval over our existing Qdrant collection:
+    Server-side hybrid retrieval over the existing Qdrant collection:
 
-    Stage 1 — Dense prefetch:
-        Fetch `prefetch_limit` candidates using the pre-computed dense vector.
-        This gives broad semantic recall.
+    Two prefetches — dense (semantic recall) and sparse BM25-style term
+    frequencies (exact identifiers like "Mm4", "Mp1", clause numbers) —
+    fused with RRF inside Qdrant. The collection declares Modifier.IDF on
+    the sparse vector, so rarity is computed corpus-wide instead of the
+    old per-candidate approximation.
 
-    Stage 2 — BM25 re-rank:
-        Score each candidate against the query using BM25 on its stored text.
-        BM25 rewards exact keyword matches that dense embeddings might miss
-        (e.g. "Mm4", "Mp1", specific clause numbers, RFC identifiers).
-
-    Stage 3 — RRF (Reciprocal Rank Fusion):
-        Combine the dense rank and BM25 rank into a single score so neither
-        signal dominates.  Returns the top_k highest-fused results as simple
-        namespace objects with .content and .meta for compatibility with
-        generate_answer().
+    Returns top_k simple namespace objects with .content and .meta for
+    compatibility with generate_answer().
     """
-    from qdrant_client import models as _qm
-
-    # ── Stage 1: dense prefetch ────────────────────────────────────────────
     results = client.query_points(
         collection_name=settings.qdrant_index,
-        prefetch=_qm.Prefetch(
-            query=query_dense,
-            using="dense",
-            limit=prefetch_limit,
-            filter=query_filter,
-        ),
-        query=query_dense,          # score by dense for initial ordering
-        using="dense",
-        limit=prefetch_limit,
+        prefetch=[
+            models.Prefetch(
+                query=query_dense, using="dense", limit=prefetch_limit, filter=query_filter
+            ),
+            models.Prefetch(
+                query=_token_sparse(query_text), using="sparse",
+                limit=prefetch_limit, filter=query_filter,
+            ),
+        ],
+        query=models.FusionQuery(fusion=models.Fusion.RRF),
+        limit=top_k,
         query_filter=query_filter,
     )
-    hits = results.points
-    if not hits:
-        return []
 
-    # ── Stage 2: BM25 scoring ──────────────────────────────────────────────
-    query_tokens = _tokenize(query_text)
-    doc_token_lists = [_tokenize(h.payload.get("text", "")) for h in hits]
-    avg_dl = sum(len(tl) for tl in doc_token_lists) / max(len(doc_token_lists), 1)
-
-    bm25_scores = [
-        _bm25_score(query_tokens, tl, avg_dl, corpus_size=len(hits))
-        for tl in doc_token_lists
-    ]
-
-    # ── Stage 3: RRF fusion ────────────────────────────────────────────────
-    # Rank by dense score (already ordered) and by BM25 score separately,
-    # then fuse with RRF constant k=60.
-    k = 60
-    dense_ranks  = {h.id: r + 1 for r, h in enumerate(hits)}
-    bm25_sorted  = sorted(range(len(hits)), key=lambda i: bm25_scores[i], reverse=True)
-    bm25_ranks   = {hits[i].id: r + 1 for r, i in enumerate(bm25_sorted)}
-
-    def rrf(hit_id):
-        return 1 / (k + dense_ranks[hit_id]) + 1 / (k + bm25_ranks[hit_id])
-
-    fused = sorted(hits, key=lambda h: rrf(h.id), reverse=True)[:top_k]
-
-    # ── Wrap as simple doc objects for generate_answer() ──────────────────
     class _Doc:
         def __init__(self, text, meta):
             self.content = text
             self.meta = meta
 
-    return [
-        _Doc(
-            text=h.payload.get("text", ""),
-            meta=h.payload,
-        )
-        for h in fused
-    ]
+    return [_Doc(h.payload.get("text", ""), h.payload) for h in results.points]
 
 
 
@@ -333,7 +278,7 @@ def search_specs(
     and optional LLM answer generation.
 
     * Without --use-bm25    : original dense + ColBERT Qdrant query (unchanged).
-    * With    --use-bm25    : Haystack 2.x QdrantEmbeddingRetriever (pre-computed vector).
+    * With    --use-bm25    : Qdrant server-side dense+sparse hybrid with RRF fusion.
     * With    --answer      : feeds the retrieved chunks to the OpenRouter LLM.
     * With    --show-reasoning : also prints the model's reasoning_details thinking chain.
     """
@@ -351,10 +296,10 @@ def search_specs(
         )
 
     # ------------------------------------------------------------------
-    # 1️⃣  Hybrid retrieval (Dense prefetch + BM25 re-rank + RRF fusion)
+    # 1️⃣  Hybrid retrieval (dense + sparse prefetch, fused server-side by RRF)
     # ------------------------------------------------------------------
     if use_bm25:
-        print(f"\n[QUERY] '{query_text}' [HYBRID: Dense prefetch → BM25 re-rank → RRF]")
+        print(f"\n[QUERY] '{query_text}' [HYBRID: Dense + sparse prefetch → server-side RRF]")
         hybrid_docs = _run_hybrid_retrieval(
             client=client,
             query_text=query_text,
@@ -486,7 +431,7 @@ def main():
     )
     parser.add_argument(
         "--use-bm25", action="store_true",
-        help="Enable Haystack hybrid retrieval (requires haystack-ai + qdrant-haystack)",
+        help="Hybrid retrieval: dense + sparse BM25 fused server-side by Qdrant (RRF)",
     )
     parser.add_argument(
         "--answer", action="store_true",
