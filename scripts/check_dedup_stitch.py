@@ -89,5 +89,23 @@ for bad in (0, -5):
     got = _dedup_docs(sample, keep=5, per_doc=bad)
     assert [d.meta["doc_id"] for d in got] == ["MEC003", "MEC030"], (bad, got)
 
+# keep is clamped the same way: 0 means "no results", not "one result" (--top-k 0).
+assert _dedup_docs(_docs([("MEC003", "aa")]), keep=0) == []
+
+# Pass 1 strips image refs, then takes the first 400 chars — order matters.
+img_a = "![d](MEC003.pdf-0035-02.png)"
+img_b = "![d](MEC079.pdf-0035-02.png)"
+body = "s" * 380          # 28 + 380 chars in, so an unstripped image path would differ
+strip_only = _dedup_docs([SimpleDoc(img_a + body, {"doc_id": "MEC003"}),
+                          SimpleDoc(img_b + body, {"doc_id": "MEC070"})], keep=5)
+assert len(strip_only) == 1, "differing image paths must not break the match"
+
+# 28 + 372 = exactly 400 chars, so slicing first would hide AAA/BBB and collapse both.
+mid = "s" * 372
+same_img = _dedup_docs([SimpleDoc(img_a + mid + "AAA", {"doc_id": "MEC003"}),
+                        SimpleDoc(img_a + mid + "BBB", {"doc_id": "MEC003"})], keep=5, per_doc=2)
+assert len(same_img) == 2, "differing text after the window must keep both excerpts"
+
 print("[check] _dedup_docs: default, per_doc, keep cap, cross-id collapse, 400-char window,")
-print("[check]               no-doc_id prefix bucketing, per_doc clamp — OK")
+print("[check]               no-doc_id prefix bucketing, per_doc clamp, keep < 1,")
+print("[check]               strip-before-window order — OK")
