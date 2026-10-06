@@ -111,28 +111,24 @@ print("[check]               no-doc_id prefix bucketing, per_doc clamp, keep < 1
 print("[check]               strip-before-window order — OK")
 
 
-def _parts(doc_id, page, part, total, text):
+def _parts(doc_id, page, chunk_part, total_parts, text):
     return SimpleDoc(text, {"doc_id": doc_id, "page": page,
-                            "chunk_part": part, "total_parts": total})
+                            "chunk_part": chunk_part, "total_parts": total_parts})
 
 
 # 1+2 of the same page merge; the row that only existed in part 2 becomes visible.
 p1 = _parts("MEC003", 16, 1, 2, "|Mm7:|The Mm7 reference point between the VIM and")
 p2 = _parts("MEC003", 16, 2, 2, "point between the VIM and the VI is used to manage the VI")
-st = _stitch_parts([p1, p2])
-assert len(st) == 1, st
-assert "used to manage" in st[0].content, st[0].content
-assert st[0].meta["stitched_parts"] == 2 and st[0].meta["chunk_part"] == 1, st[0].meta
+merged = _stitch_parts([p1, p2])
+assert len(merged) == 1, merged
+assert "used to manage" in merged[0].content, merged[0].content
+assert merged[0].meta["stitched_parts"] == 2 and merged[0].meta["chunk_part"] == 1, merged[0].meta
 
 # 1+3 is a gap: joining it would fabricate a page that was never retrieved.
 gap = _stitch_parts([_parts("MEC003", 16, 1, 3, "aaa bbb"), _parts("MEC003", 16, 3, 3, "eee fff")])
 assert len(gap) == 2, gap
 
-# Different pages of the same doc never merge. Both parts here are part 1, which the
-# contiguity rule alone already rejects, so the cross-page pair below is what pins the
-# page component of the grouping key: 1 of page 16 + 2 of page 17 *looks* contiguous.
-pages = _stitch_parts([_parts("MEC003", 16, 1, 2, "one"), _parts("MEC003", 17, 1, 2, "two")])
-assert len(pages) == 2, pages
+# 1 of page 16 + 2 of page 17 *looks* contiguous, so this pins the page component of the key.
 xpage = _stitch_parts([_parts("MEC003", 16, 1, 2, "one"), _parts("MEC003", 17, 2, 2, "two")])
 assert len(xpage) == 2, xpage
 
@@ -146,9 +142,15 @@ solo = _parts("MEC030", 8, 1, 1, "solo text")
 legacy = SimpleDoc("legacy text", {"doc_id": "MEC030"})
 assert _stitch_parts([solo, legacy]) == [solo, legacy]
 
+# Two metadata-less hits sharing a doc_id: drop the isinstance guard and the second one
+# looks up "chunk_part" on the first's meta and raises KeyError instead of passing through.
+legacy_a = SimpleDoc("aaa", {"doc_id": "MEC003"})
+legacy_b = SimpleDoc("bbb", {"doc_id": "MEC003"})
+assert _stitch_parts([legacy_a, legacy_b]) == [legacy_a, legacy_b]
+
 # Out-of-order parts are not falsely merged (2 arriving before 1 is not contiguous).
-dis = _stitch_parts([_parts("MEC003", 16, 2, 3, "bbb"), _parts("MEC003", 16, 1, 3, "aaa")])
-assert len(dis) == 2, dis
+rev = _stitch_parts([_parts("MEC003", 16, 2, 3, "bbb"), _parts("MEC003", 16, 1, 3, "aaa")])
+assert len(rev) == 2, rev
 
 # The strongest assertion here: a real-shaped 700-word page, sliced exactly the way
 # ingest.chunk_page_text(max_words=300, overlap=40) slices it (that function cannot be
