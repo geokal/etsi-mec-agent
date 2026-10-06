@@ -31,6 +31,8 @@ src/etsi_mec_agent/
   ingest.py          # PDF → chunks → embed → upsert  (CLI: uv run python -m etsi_mec_agent.ingest)
   search.py          # hybrid search + LLM answer       (CLI: uv run python -m etsi_mec_agent.search)
   dedup.py           # rank shaping (stitch + dedup) — must stay stdlib-only, so scripts/check_dedup_stitch.py runs without ONNX
+  chunking.py        # page markdown → row/clause-aware chunks; stdlib-only for scripts/check_chunking.py
+  identity.py        # spec_id / edition / pub_date read off the PDF cover (pymupdf, no ONNX)
   agent.py           # monitor entrypoint
   tools/
     clip_embed.py    # CLIP image embedder (CPU-safe, lazy-loads)
@@ -44,6 +46,7 @@ scripts/
   deduplicate_collection.py # remove duplicate chunks in-place (no re-embed)
   audit_specs.py            # report data/specs files and manifest keys naming the wrong spec
   check_dedup_stitch.py     # asserts for dedup.py; no models, no Qdrant
+  check_chunking.py         # asserts for chunking.py: rows never cut, headers repeated; no models
   eval_rag.py               # golden-question recall@k, both paths + the --answer budget
   migrate_add_sparse.py     # copy points into a new collection that has 'sparse' (no re-embed)
   graph_visualize.py        # force-directed spec relationship graph
@@ -87,6 +90,9 @@ uv run python -m etsi_mec_agent.ingest --skip-existing
 
 # Full re-ingest (wipes collection first)
 uv run python -m etsi_mec_agent.ingest --recreate-index
+
+# See what the chunker would emit — no models, no writes
+uv run python -m etsi_mec_agent.ingest data/specs/MEC003.pdf --dry-run --no-diagrams --show-chunks 3
 
 # Search
 uv run python -m etsi_mec_agent.search "What is Mp1?"
@@ -139,6 +145,7 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
   `search.py::build_filter` excludes `is_current=false` and `_dedup_docs` spends the `--per-doc`
   quota per `content_md5`, so four aliases of one spec share a quota instead of each claiming one.
   Nothing new should key on `doc_id` alone; `doc_id` is a filename and filenames lie here.
+- **Chunk by rows, embed with context.** `chunking.py::chunk_page` packs whole markdown units, so a table row is never cut and every table chunk repeats its header and clause; prose over the limit keeps the old 300-word/40-overlap window because `dedup._stitch` trims that overlap. Sizes are bounded by an estimated token count (pipes and `<br>` are tokens), not words alone — ColBERT caps a passage at 512. What is *embedded* is `spec_id edition clause heading + body`; what is *stored* is the page markdown, and query text is never expanded (asymmetric on purpose). `identity.stamp()` runs per PDF and `is_current` starts True for everything, so **after any ingest run `scripts/backfill_spec_identity.py --apply`** — which edition is newest is only knowable once the whole corpus is in. Ingest also skips byte-identical PDFs by md5 (106 files are 54 documents).
 - **`openrouter/free`** is the correct model ID for the free-tier routing endpoint. Do not change it to a specific model ID unless the user requests a pinned model.
 - **`has_diagram` index** is `PayloadSchemaType.BOOL` — an older collection has it as `KEYWORD` (bug, pre-fix). Recreating the index fixes it.
 - **batch_size=16** in `ingest.py` — safe for 16 GB RAM with 300-word chunks. Do not lower without a good reason.

@@ -18,7 +18,8 @@ plain `qdrant_client`, and `QdrantDocumentStore` rejects a collection it did not
          ├──── render_vector_figures(): vector drawings → PNG @200 dpi,
          │       stacked raster tiles merged, blank/tiny/duplicate images dropped
          ▼
- [chunk_page_text()] (300-word sliding window, 40-word overlap)
+ [chunk_page()] (row- and clause-aware packing: <=300 words, <=420 est. tokens,
+         │       a table row is never cut and every table chunk keeps its header)
          │
          ├──── Dense embedding (BAAI/bge-small-en-v1.5, 384-dim)
          ├──── ColBERT embedding (colbert-ir/colbertv2.0, N×128-dim)
@@ -96,7 +97,8 @@ Query: "Explain the role of Mp1 in MEC"
 
 - **Document Parser**: **PyMuPDF4LLM** extracts layout-aware Markdown, tables, and embedded raster images.
 - **Diagram Capture**: `render_vector_figures()` renders the vector drawings ETSI specs actually use (box-and-arrow figures are not embedded rasters) at 200 dpi and merges adjacent raster tiles into a single whole figure; `_image_is_worth_keeping()` drops blank, sub-200px, and duplicate images.
-- **Chunking**: `chunk_page_text()` uses a 300-word sliding window (40-word overlap) to stay within ColBERT's 512-token context limit.
+- **Chunking**: `chunking.chunk_page()` packs whole units — a markdown table row, a paragraph, a heading — so a row is never cut mid-cell and every table chunk carries its clause and header row. Prose over the limit still uses the 300-word window with 40-word overlap, and sizes are held by a token estimate (pipes and `<br>` count), not just a word count, because ColBERT caps a passage at 512 tokens.
+- **Identity and context on the document side**: `identity.stamp()` reads the ETSI title line off the PDF cover and every chunk carries `spec_id` / `edition` / `pub_date` / `content_md5` / `is_current`; what gets embedded is `spec_id edition clause heading + body` while what is stored and shown stays the page markdown. Query text is not expanded — asymmetric on purpose.
 - **Embedding Engine**: [FastEmbed](https://github.com/qdrant/fastembed) runs locally via ONNX Runtime (zero API costs, runs on CPU).
 - **Vector Database**: [Qdrant](https://qdrant.tech/) running via official Docker container.
 - **PDF Monitor**: `tools/monitor_deliver.py` polls Exa for new ETSI PDF releases and downloads them automatically.

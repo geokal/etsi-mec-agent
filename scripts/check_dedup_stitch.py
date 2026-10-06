@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from etsi_mec_agent.chunking import chunk_page
 from etsi_mec_agent.dedup import SimpleDoc, _dedup_docs, _stitch, _stitch_parts
 
 # The attribute contract `generate_answer` and `_dedup_docs` will code against.
@@ -22,7 +23,7 @@ out = _stitch(a, b)
 assert out.count("TAIL1") == 1, f"overlap not trimmed: {out}"
 assert out.startswith("alpha0") and out.endswith("beta2"), out
 
-# The real ingest contract: chunk_page_text(max_words=300, overlap=40) emits
+# The real ingest contract: chunking.chunk_page slices an over-long prose paragraph into
 # words[:300] and words[260:400], so stitching must give the page back exactly.
 page = " ".join(f"w{i}" for i in range(400))
 pw = page.split()
@@ -30,14 +31,18 @@ part1 = " ".join(pw[:300])
 part2 = " ".join(pw[260:400])
 assert _stitch(part1, part2).split() == pw, "40-word window not reconstructed exactly"
 
-# No overlap: plain concatenation, nothing invented.
-assert _stitch("one two", "three four") == "one two three four"
+# No overlap: joined on a newline, nothing invented.
+assert _stitch("one two", "three four") == "one two\nthree four"
+
+# The reason for the newline join: two table parts merge as rows, not as one flattened run of
+# pipes, or the answer path loses exactly the structure row-aware chunking just bought.
+assert _stitch("|A:|one|", "|B:|two|") == "|A:|one|\n|B:|two|"
 
 # b entirely contained in a's tail (degenerate window) -> no duplicate text.
 assert _stitch("x y z", "y z") == "x y z"
 
 # A single coincidental shared token is not the 40-word overlap: keep both, drop nothing.
-assert _stitch("a b c the", "the d e") == "a b c the the d e"
+assert _stitch("a b c the", "the d e") == "a b c the\nthe d e"
 
 # Empty inputs just pass the other side through.
 assert _stitch("", "x") == "x"
@@ -190,12 +195,12 @@ chain = _stitch_parts([_parts("MEC003", 16, n, 4, t) for n, t in
 assert len(chain) == 2 and chain[0].meta["stitched_parts"] == 2, chain
 assert chain[1].meta["chunk_part"] == 4 and "stitched_parts" not in chain[1].meta, chain[1].meta
 
-# The strongest assertion here: a real-shaped 700-word page, sliced exactly the way
-# ingest.chunk_page_text(max_words=300, overlap=40) slices it (that function cannot be
-# imported here — ingest pulls fastembed at module level), must come back token for token.
+# The strongest assertion here: a real-shaped 700-word page, sliced by the real chunker
+# (chunking.py is stdlib-only, so this imports the producer instead of imitating it), must
+# come back token for token.
 page700 = " ".join(f"p{i}" for i in range(700))
 pw700 = page700.split()
-sliced = [" ".join(pw700[i:i + 300]) for i in range(0, len(pw700), 260)]
+sliced = [c.text for c in chunk_page(page700, max_words=300, overlap=40)]
 assert len(sliced) == 3, len(sliced)
 rebuilt = _stitch_parts([_parts("MEC003", 42, n, 3, t) for n, t in enumerate(sliced, 1)])
 assert len(rebuilt) == 1, len(rebuilt)

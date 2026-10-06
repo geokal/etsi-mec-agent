@@ -21,19 +21,36 @@ class SimpleDoc:
 def _stitch(a: str, b: str, max_overlap: int = 60) -> str:
     """Append b to a, dropping the tokens b repeats from the end of a.
 
-    Only for contiguous parts of one page: sliced parts are `" ".join`ed words, so
-    token comparison is exact, but a page short enough to be one chunk keeps raw
-    markdown newlines and this function would flatten them.
+    Only for contiguous parts of one page. Joined with a newline, not a space: table rows are
+    one row per line and a space join would flatten them back into the pipe soup that made
+    reference-point tables unreadable. Overlap trimming still compares word tokens, which
+    whitespace ignores, so the join does not weaken it.
     """
-    # ponytail: must stay >= ingest chunk_page_text overlap (40); a smaller window silently
+    # ponytail: must stay >= chunking.chunk_page prose overlap (40); a smaller window silently
     # keeps the duplicate instead of trimming. Upgrade path: pass the overlap in from the caller.
     aw, bw = a.split(), b.split()
     n = min(len(aw), len(bw), max_overlap)
     # k stops at 2: one shared token isn't the 40-word overlap; show the duplicate instead
     for k in range(n, 1, -1):
         if aw[-k:] == bw[:k]:
-            return " ".join(aw + bw[k:])
-    return " ".join(aw + bw)
+            rest = _text_after(b, k)
+            return f"{a}\n{rest}" if rest else a
+    return f"{a}\n{b}" if a.strip() and b.strip() else (a or b)
+
+
+def _text_after(text: str, tokens: int) -> str:
+    """`text` without its first `tokens` whitespace-separated words, layout otherwise intact.
+
+    Rebuilding from `text.split()` — which the old version did — throws away the line structure,
+    and a markdown table is only readable one row per line.
+    """
+    pos = 0
+    for m in re.finditer(r"\S+", text):
+        pos = m.end()
+        tokens -= 1
+        if tokens == 0:
+            break
+    return text[pos:].lstrip()
 
 
 def _dedup_docs(docs: list, keep: int, per_doc: int = 1) -> list:
