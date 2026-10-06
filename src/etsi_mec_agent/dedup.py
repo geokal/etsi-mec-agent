@@ -6,7 +6,8 @@ that lives here would otherwise drag ONNX runtime into every check script.
 import re
 from dataclasses import dataclass
 
-_IMG_RE = re.compile(r"!\[.*?\]\(.*?\)")  # strip markdown image refs before fingerprinting
+# strip markdown image refs before fingerprinting; consumed once _dedup_docs moves here
+_IMG_RE = re.compile(r"!\[.*?\]\(.*?\)")
 
 
 @dataclass(frozen=True)
@@ -24,8 +25,8 @@ def _stitch(a: str, b: str, max_overlap: int = 60) -> str:
     token comparison is exact, but a page short enough to be one chunk keeps raw
     markdown newlines and this function would flatten them.
     """
-    # ponytail: must stay >= ingest chunk_page_text overlap (40); a larger window
-    # silently keeps the duplicate instead of trimming. Upgrade path: pass the overlap in.
+    # ponytail: must stay >= ingest chunk_page_text overlap (40); a smaller window silently
+    # keeps the duplicate instead of trimming. Upgrade path: pass the overlap in from the caller.
     aw, bw = a.split(), b.split()
     n = min(len(aw), len(bw), max_overlap)
     # k stops at 2: one shared token isn't the 40-word overlap; show the duplicate instead
