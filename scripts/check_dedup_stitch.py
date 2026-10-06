@@ -148,9 +148,30 @@ legacy_a = SimpleDoc("aaa", {"doc_id": "MEC003"})
 legacy_b = SimpleDoc("bbb", {"doc_id": "MEC003"})
 assert _stitch_parts([legacy_a, legacy_b]) == [legacy_a, legacy_b]
 
-# Out-of-order parts are not falsely merged (2 arriving before 1 is not contiguous).
+# RECONCILED EXPECTATION. This assert used to read `assert len(rev) == 2` with the comment
+# "2 arriving before 1 is not contiguous", i.e. it pinned the arrival-order rule itself. That
+# rule is the bug: part 2 outranks part 1 in this corpus, so most pages could never merge.
+# Arrival order no longer decides whether a run merges (it only decides its position, below).
 rev = _stitch_parts([_parts("MEC003", 16, 2, 3, "bbb"), _parts("MEC003", 16, 1, 3, "aaa")])
-assert len(rev) == 2, rev
+assert len(rev) == 1 and rev[0].content.split() == ["aaa", "bbb"], rev
+
+# The other half of that rule: [2, 1] and [1, 2] must produce the SAME text, not just both merge.
+asc = _stitch_parts([_parts("MEC003", 16, 1, 3, "aaa"), _parts("MEC003", 16, 2, 3, "bbb")])
+assert asc[0].content == rev[0].content and asc[0].meta == rev[0].meta, (asc[0].content, rev[0].content)
+
+# Output position = the earliest-arriving member of the run, and nothing else moves.
+posn = _stitch_parts([_parts("MEC003", 16, 2, 3, "ccc ddd"), _parts("MEC070", 9, 1, 2, "other"),
+                      _parts("MEC003", 16, 1, 3, "aaa bbb")])
+assert len(posn) == 2 and posn[0].meta["stitched_parts"] == 2, posn
+assert posn[0].content.split() == "aaa bbb ccc ddd".split(), posn[0].content
+assert posn[1].content == "other", posn
+
+# A group holding a gap splits into chains rather than merging everything it collected: 1+2
+# merge, 4 stays its own excerpt because 3 was never retrieved.
+chain = _stitch_parts([_parts("MEC003", 16, n, 4, t) for n, t in
+                       ((1, "aaa bbb"), (2, "bbb ccc"), (4, "eee fff"))])
+assert len(chain) == 2 and chain[0].meta["stitched_parts"] == 2, chain
+assert chain[1].meta["chunk_part"] == 4 and "stitched_parts" not in chain[1].meta, chain[1].meta
 
 # The strongest assertion here: a real-shaped 700-word page, sliced exactly the way
 # ingest.chunk_page_text(max_words=300, overlap=40) slices it (that function cannot be
@@ -175,8 +196,8 @@ assert len(inter) == 2, inter
 assert inter[0].meta["stitched_parts"] == 2, inter[0].meta
 assert inter[0].content.split() == "|Mm7:|The Mm7 reference point between the VIM".split(), inter[0].content
 
-# "a new run may start at part 3": a run opening mid-page still merges 2+3, which is what
-# lets a merged excerpt begin mid-page without ever inventing a middle.
+# a run may open mid-page: part 1 was never retrieved, 2+3 are contiguous, so they still
+# merge — a merged excerpt can begin mid-page but never invents a middle.
 mid_run = _stitch_parts([_parts("MEC003", 16, 2, 3, "bbb ccc"), _parts("MEC003", 16, 3, 3, "ccc ddd")])
 assert len(mid_run) == 1 and mid_run[0].meta["stitched_parts"] == 2, mid_run
 
@@ -187,6 +208,23 @@ ident = _stitch_parts([solo, legacy])
 assert ident[0] is solo and ident[1] is legacy, ident
 assert "stitched_parts" not in p1.meta, p1.meta
 
+# Siblings merge regardless of arrival order — part 2 usually outranks part 1 in the real corpus.
+# NOTE: the requested pair was part 1 = "aaa bbb" / part 2 = "bbb ccc ddd", but _stitch only trims
+# an overlap of 2+ tokens (one shared token is coincidence, not the 40-word window — pinned above),
+# so that pair merges to "aaa bbb bbb ccc ddd". Same rule, same asserts, parts sharing "bbb ccc".
+ooo = _stitch_parts([_parts("MEC003", 16, 2, 3, "bbb ccc ddd"),
+                     _parts("MEC003", 16, 1, 3, "aaa bbb ccc")])
+assert len(ooo) == 1 and ooo[0].content.split() == "aaa bbb ccc ddd".split(), ooo
+assert ooo[0].meta["chunk_part"] == 1 and ooo[0].meta["stitched_parts"] == 2, ooo[0].meta
+
+# A gap in the middle stays two excerpts even when sorted — and both are the caller's own
+# objects, still in arrival order, with no stitched_parts added.
+g3, g1 = _parts("MEC003", 16, 3, 4, "eee fff"), _parts("MEC003", 16, 1, 4, "aaa bbb")
+gapper = _stitch_parts([g3, g1])
+assert len(gapper) == 2, gapper
+assert gapper[0] is g3 and gapper[1] is g1, [id(d) for d in gapper]
+assert all("stitched_parts" not in d.meta for d in gapper), [d.meta for d in gapper]
+
 print("[check] _stitch_parts: merge, gap, page & doc_id in the key, passthrough identity,")
-print("[check]               reversed order, mid-page run start, interleaved parts,")
-print("[check]               700-word round-trip — OK")
+print("[check]               order-independent merge, earliest-arrival output position,")
+print("[check]               mid-page run start, chain split at a gap, 700-word round-trip — OK")

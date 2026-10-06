@@ -90,14 +90,16 @@ def _dedup_docs(docs: list, keep: int, per_doc: int = 1) -> list:
 
 
 def _stitch_parts(docs: list) -> list:
-    """Merge ascending runs of `chunk_part`s sharing a doc_id+page into one excerpt.
+    """Merge contiguous runs of `chunk_part`s sharing a doc_id+page into one excerpt.
 
-    A part joins the run when its number is one above the last part accepted for that
-    doc_id+page, tracked across the whole ranked list, so an unrelated excerpt sitting
-    between part 1 and part 2 does not break the run. Reversed (2 then 1) or gapped
-    (1 then 3) parts open a new run rather than fabricating text that was never
-    retrieved; a new run may start at part 3, so a merged excerpt can begin mid-page
-    but never invents a middle.
+    Parts are grouped by doc_id+page first and sorted by chunk_part, so a part's rank in
+    the retrieved list decides only WHERE its excerpt comes out (the position of the
+    earliest-arriving member of its run), never whether it merges: part 2 usually outranks
+    part 1 in this corpus, and an ascending-only rule let that cost the merge. Within a
+    sorted group a part joins the run when it is one above the last part accepted, so a
+    genuine gap (1 then 3, 2 never retrieved) stays two excerpts rather than fabricating
+    text that was never retrieved. A merged excerpt carries the meta of its lowest-numbered
+    part plus `stitched_parts`.
 
     A run that ends up holding one excerpt passes through as the caller's own object:
     points with no usable part metadata, whole pages (total_parts <= 1), and a part whose
@@ -105,36 +107,39 @@ def _stitch_parts(docs: list) -> list:
     returned list mixes both types — read `.content` and `.meta`, which every element
     provides, rather than assuming one class.
     """
-    runs = []
-    open_run = {}              # (doc_id, page) -> run that still accepts the next part
+    groups = {}   # (doc_id, page) -> [(chunk_part, arrival index, doc)]
+    slots = {}    # arrival index -> the excerpt printed at that position
 
-    for doc in docs:
+    for i, doc in enumerate(docs):
         meta = doc.meta or {}
         part, total = meta.get("chunk_part"), meta.get("total_parts")
         # total <= 1 is the common case: a whole page (median chunk 243 words) has no
         # siblings to merge, so it never needs run tracking.
         if not isinstance(part, int) or not isinstance(total, int) or total <= 1:
-            runs.append([doc])
+            slots[i] = doc
             continue
-        key = (meta.get("doc_id", ""), meta.get("page"))
-        run = open_run.get(key)
-        if run is not None and run[-1].meta["chunk_part"] + 1 == part:
-            run.append(doc)
-        else:
-            runs.append([doc])
-            open_run[key] = runs[-1]
+        groups.setdefault((meta.get("doc_id", ""), meta.get("page")), []).append((part, i, doc))
 
-    out = []
-    for run in runs:
-        # Not a fast path, and not for the reason it looks like: _stitch only ever sees a
-        # run's 2nd+ part, so dropping this branch would NOT flatten single-part text. What
-        # it really costs is the caller's object identity plus a stitched_parts: 1 key on a
-        # one-part excerpt — the two things scripts/check_dedup_stitch.py pins by identity.
-        if len(run) == 1:
-            out.append(run[0])
-            continue
-        text = run[0].content
-        for nxt in run[1:]:
-            text = _stitch(text, nxt.content)
-        out.append(SimpleDoc(text, {**run[0].meta, "stitched_parts": len(run)}))
-    return out
+    for members in groups.values():
+        members.sort()  # by chunk_part, ties by arrival; arrivals are unique so docs never compare
+        runs = []
+        for member in members:
+            if runs and runs[-1][-1][0] + 1 == member[0]:
+                runs[-1].append(member)
+            else:
+                runs.append([member])
+        # each doc belongs to exactly one run, so the min-arrival positions below are unique
+        for run in runs:
+            pos = min(i for _, i, _ in run)
+            # Not a fast path, and not for the reason it looks like: dropping this branch would
+            # rebuild the excerpt, costing the caller's object identity plus a stitched_parts: 1
+            # key on a one-part excerpt — the two things scripts/check_dedup_stitch.py pins.
+            if len(run) == 1:
+                slots[pos] = run[0][2]
+                continue
+            text = run[0][2].content
+            for _, _, nxt in run[1:]:
+                text = _stitch(text, nxt.content)
+            slots[pos] = SimpleDoc(text, {**run[0][2].meta, "stitched_parts": len(run)})
+
+    return [slots[i] for i in sorted(slots)]

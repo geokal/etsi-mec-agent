@@ -51,7 +51,7 @@ Query: "Explain the role of Mp1 in MEC"
      ▼                            ▼
 ┌──────────────────┐   ┌──────────────────────────────┐
 │ dense 384-dim    │   │ dense  → prefetch 100        │
-│   ↓ prefetch 25  │   │ sparse → prefetch 100        │
+│ ↓ prefetch 25/45 │   │ sparse → prefetch 100        │
 │ colbert MaxSim   │   │  (crc32 token → raw TF,      │
 │   re-score per   │   │   IDF weighted server-side)  │
 │   query token    │   │  ↓ RRF fusion inside Qdrant  │
@@ -60,6 +60,8 @@ Query: "Explain the role of Mp1 in MEC"
     fetch_k chunks          fetch_k×6 candidates (30 without --answer,
                                                     90 with it, --top-k 5)
         fetch_k = max(--top-k, --answer-context) — 5 or 15 by default
+        PATH A re-scores max(--prefetch, 3×fetch_k) dense candidates and keeps fetch_k,
+        PATH B hands stitching fetch_k×6 candidates — only those can merge.
                                     │
                                     ▼   (PATH A takes the same two steps)
                     _stitch_parts(): contiguous parts of one page —
@@ -260,7 +262,10 @@ Worth knowing before trusting an aggregation-style question:
   evidence set over the same stitched list: up to `--answer-context` excerpts (default 15), with
   up to `--per-doc` (default 2) from any one document. Parts of a page that the 300-word window
   split are merged before either budget, so a table reaches the prompt whole instead of losing its
-  continuation to the one-slot-per-document display rule.
+  continuation to the one-slot-per-document display rule — **provided both parts were retrieved**.
+  The merge only sees the retrieved list, so a page whose continuation was scored out of it still
+  arrives cut off. `--answer` prints how many groups merged for that query; 0 means no sibling pair
+  was in the list at all.
 - **Paths, not pixels.** Diagram filenames go into the prompt; no image bytes are sent, so the
   model can cite a figure but cannot read it.
 - **One query, one pass.** No sub-question decomposition and no second retrieval round over what
