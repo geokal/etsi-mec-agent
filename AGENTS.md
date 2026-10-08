@@ -122,6 +122,10 @@ uv run python -m etsi_mec_agent.search "What is Mp1?"
 uv run python -m etsi_mec_agent.search "Mm4 role" --use-bm25 --answer
 uv run python -m etsi_mec_agent.search "Mm4 role" --use-bm25 --answer --show-reasoning
 
+# Drop byte-identical duplicate PDFs (keepers are what the index references; dry run first)
+uv run python scripts/dedupe_spec_pdfs.py
+uv run python scripts/dedupe_spec_pdfs.py --apply
+
 # Clean duplicate chunks in-place (no re-embedding, ~10 min)
 uv run python scripts/deduplicate_collection.py --dry-run
 uv run python scripts/deduplicate_collection.py

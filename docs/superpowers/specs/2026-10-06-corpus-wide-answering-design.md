@@ -239,6 +239,40 @@ table integrity, and it is met on its own terms, not by recall.
 
 ---
 
+## 5f. Cutover and corpus cleanup, 2026-10-08
+
+Production now reads the prototype. `rename_alias` is rejected by Qdrant 1.19.1 in every field order
+(`data did not match any variant of untagged enum AliasOperations`), while `create_alias` and
+`delete_alias` work, so the switch was one atomic three-action call:
+
+```json
+{"actions":[{"create_alias":{"collection_name":"etsi_mec_specs_v2","alias_name":"etsi_mec_specs_old"}},
+            {"delete_alias":{"alias_name":"etsi_mec_specs"}},
+            {"create_alias":{"collection_name":"etsi_mec_prototype","alias_name":"etsi_mec_specs"}}]}
+```
+
+`etsi_mec_specs` → `etsi_mec_prototype` (5264 chunks); `etsi_mec_specs_old` → `etsi_mec_specs_v2`
+(4669 chunks), which is the rollback. Nothing was deleted, and the default `QDRANT_INDEX` needed no
+change because the alias is what moved.
+
+`data/specs` was 106 files for 54 documents. `scripts/dedupe_spec_pdfs.py` (dry run by default) kept
+whichever copy the live index's `filename` payload points at and removed the other 52 — 51 MB, leaving
+54 files, verified against the index so no stored chunk lost its document. The backup collection still
+names 36 files that no longer exist; harmless in a backup, fatal if it is ever re-ingested.
+
+The downloaders got the rules that should have been in place from the start, in
+`identity.keep_if_new()` (temp file, md5 against the folder, refuse the duplicate) and
+`identity.safe_spec_filename()` (`MEC003-<cover title>.pdf`, unnumbered documents keep the name they
+arrived with) — `scripts/check_download_naming.py` asserts both. Along the way: `spec_sync.py` had not
+been importable since before this branch (`forge_client` never existed in `etsi_forge`, and the
+Haystack `Tool` name was never imported), so the md5 gate would not have reached the code path it was
+meant to protect.
+
+Open: q12 is missed by all three paths in both collections; the answer still mislabels citations
+(§5e), tracked as the grounding task.
+
+---
+
 ## 6. Out of scope here
 
 - Replacing the parser with Docling/unstructured (approach C): new heavy dependencies on a 16 GB
