@@ -10,6 +10,21 @@ Local RAG pipeline over ETSI GS MEC PDFs: ingest → tri-vector Qdrant (dense + 
 
 ---
 
+## Agent startup — the first two tool calls
+
+1. **Serena**: `activate_project` with project `etsi-mec-agent`. Serena is registered globally
+   (`~/.qoder/settings.json`) without `--project`, so nothing works until this call runs.
+   Line numbers are 0-based; `--context ide` excludes `create_text_file`/`read_file`, so brand-new
+   files use the IDE's own Write tool and every edit to existing code goes through Serena.
+2. **code-review-graph**: `get_minimal_context_tool` (~100 tokens) for node/edge counts, risk and
+   `head_matches_build`. Only call `build_or_update_graph_tool` when that flag is false.
+
+If either server's tools are missing from the session, it is a dropped connection — usually memory
+pressure from a local ingest run — not a config problem. Retry the connection from the MCP panel and
+re-check the tool list; do not edit `~/.qoder/settings.json`.
+
+---
+
 ## Package manager — `uv` only
 
 ```powershell
@@ -90,6 +105,11 @@ uv run python -m etsi_mec_agent.ingest --skip-existing
 
 # Full re-ingest (wipes collection first)
 uv run python -m etsi_mec_agent.ingest --recreate-index
+
+# Ingest into another collection — there is no --index flag; everything reads QDRANT_INDEX,
+# so backfill and eval must run in the same shell
+$env:QDRANT_INDEX="etsi_mec_prototype"
+uv run python -m etsi_mec_agent.ingest data/specs --recreate-index
 
 # See what the chunker would emit — no models, no writes
 uv run python -m etsi_mec_agent.ingest data/specs/MEC003.pdf --dry-run --no-diagrams --show-chunks 3
