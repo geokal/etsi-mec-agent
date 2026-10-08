@@ -2,6 +2,10 @@
 
 An intelligent indexing and RAG agent for ETSI MEC (Multi-access Edge Computing) specifications using **FastEmbed** (local ONNX embeddings), **Qdrant** in Docker, and hybrid retrieval — a `dense` + `sparse` prefetch pair fused by RRF **inside Qdrant**, plus a separate `dense` → `colbert` MaxSim re-rank path — with optional LLM answers via OpenRouter.
 
+![Terminal demo: a hybrid search run answering 'What is the MEP?' — 15 excerpts labelled by cover identity are handed to the LLM, then the citation check reports all seven page citations as present in the retrieved excerpts](ETSI_AGENT_DEMO.gif)
+
+*The run above is `uv run python -m etsi_mec_agent.search "What is the MEP?" --use-bm25 --answer`.*
+
 Haystack is deliberately not used: the collection is created and queried through the
 plain `qdrant_client`, and `QdrantDocumentStore` rejects a collection it did not create.
 
