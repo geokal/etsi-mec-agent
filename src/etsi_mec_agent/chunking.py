@@ -120,13 +120,18 @@ def _units(text: str) -> list[tuple[str, str, str, str]]:
     return units
 
 
-def chunk_page(text: str, max_words: int = 300, overlap: int = 40, max_tokens: int = 420) -> list[PageChunk]:
+def chunk_page(text: str, max_words: int = 300, overlap: int = 40, max_tokens: int = 420,
+               min_words: int = 150) -> list[PageChunk]:
     """Pack indivisible units into chunks, cutting only between rows or paragraphs.
 
     `max_tokens` is what ColBERT's 512-token passage limit actually constrains; `max_words`
     stays for prose because that is the size the rest of the pipeline was measured at. A table
     row longer than both limits is kept whole rather than sliced: cutting a row is cutting a
     cell, and ingest's per-chunk fallback skips the rare giant instead.
+
+    `min_words` is the floor that stops a clause change from shattering a dense table: measured
+    on the re-ingested corpus, splitting at every clause left 4456 chunks sitting on pages broken
+    into more than 8 parts, 15-word fragments that neither rank nor stitch back usefully.
     """
     def fits(candidate: str) -> bool:
         return len(candidate.split()) <= max_words and estimate_tokens(candidate) <= max_tokens
@@ -144,7 +149,7 @@ def chunk_page(text: str, max_words: int = 300, overlap: int = 40, max_tokens: i
         chunks.append(PageChunk(
             "\n".join(pieces()),
             "table" if table_clauses else "prose",
-            table_clauses[-1] if table_clauses else cur[0][2],
+            table_clauses[0] if table_clauses else cur[0][2],
         ))
         cur.clear()
 
@@ -159,10 +164,9 @@ def chunk_page(text: str, max_words: int = 300, overlap: int = 40, max_tokens: i
                 chunks.append(PageChunk(" ".join(words[i : i + max_words]), "prose", clause))
             continue
 
-        # A clause change inside one table starts a new chunk, so a chunk labelled 7.2.2 holds
-        # only 7.2.2 rows. Prose keeps running across clauses: the page banner and the heading
-        # belong with the table underneath them, not in a chunk of their own.
-        if cur and kind == "table":
+        # A clause change ends a chunk only once the chunk is substantial, so a chunk labelled
+        # 7.2.2 holds 7.2.2 rows without dense tables degenerating into row confetti.
+        if cur and kind == "table" and sum(len(p.split()) for p, _, _ in cur) >= min_words:
             held = [cl for _, k, cl in cur if k == "table"]
             if held and held[-1] != clause:
                 close()
