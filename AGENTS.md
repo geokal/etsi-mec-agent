@@ -61,10 +61,12 @@ scripts/
   deduplicate_collection.py # remove duplicate chunks in-place (no re-embed)
   audit_specs.py            # report data/specs files and manifest keys naming the wrong spec
   dedupe_spec_pdfs.py       # delete byte-identical PDFs in data/specs (dry run by default; keeps what the index points at)
+  drop_no_signal_chunks.py  # delete chunks that are only ETSI page furniture (dry run by default, --apply deletes)
   check_download_naming.py  # asserts identity.keep_if_new / safe_spec_filename / dedupe keepers; no models
   check_dedup_stitch.py     # asserts for dedup.py; no models, no Qdrant
   check_chunking.py         # asserts for chunking.py: rows never cut, headers repeated; no models
   check_eval_golden.py      # asserts eval_rag's golden sets are answerable from the live collection; no models
+  check_answer_grounding.py # asserts generate_answer labels excerpts by cover identity and audits its own citations; no models, openai is faked
   eval_rag.py               # golden-question recall@k, both paths + the --answer budget
   migrate_add_sparse.py     # copy points into a new collection that has 'sparse' (no re-embed)
   graph_visualize.py        # force-directed spec relationship graph
@@ -135,6 +137,10 @@ uv run python -m etsi_mec_agent.search "Mm4 role" --use-bm25 --answer --show-rea
 uv run python scripts/dedupe_spec_pdfs.py
 uv run python scripts/dedupe_spec_pdfs.py --apply
 
+# Delete the chunks the old chunker wrote from ETSI page furniture alone (dry run first)
+uv run python scripts/drop_no_signal_chunks.py
+uv run python scripts/drop_no_signal_chunks.py --apply
+
 # Clean duplicate chunks in-place (no re-embedding, ~10 min)
 uv run python scripts/deduplicate_collection.py --dry-run
 uv run python scripts/deduplicate_collection.py
@@ -174,6 +180,20 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
 - **Three named vectors per point**: `dense` (384-dim Cosine, global recall) + `colbert` (128-dim Dot MaxSim on_disk, precision re-rank) + `sparse` (crc32-hashed raw term frequencies, `Modifier.IDF` applied server-side). `dense` + `sparse` feed the hybrid query; `colbert` feeds the re-rank path.
 - **`--use-bm25` does NOT use Haystack** — the collection was created outside Haystack and `QdrantDocumentStore` rejects it. Fusion happens inside Qdrant: `search.py::_run_hybrid_retrieval` sends two `Prefetch`es plus `FusionQuery(fusion=models.Fusion.RRF)`. `Fusion.RRF` is an enum member — passing it called (`RRF()`) raises `TypeError: 'Fusion' object is not callable`.
 - **Display and evidence are two budgets.** `search_specs` prints `_dedup_docs(stitched, keep=--top-k)` (one excerpt per document) and hands the LLM `_dedup_docs(stitched, keep=--answer-context, per_doc=--per-doc)` over the same stitched list. A page the 300-word window splits is stored as `chunk_part 1 of 2` / `2 of 2`, so `_stitch_parts()` runs first: one chunk per document used to discard the continuation and hand the LLM a table ending mid-cell.
+- **Citations are audited, not just requested.** `search.py::_source_label` names an excerpt by the
+  identity stamped on its PDF (`MEC-003 V4.1.1 p.15`) and the filename never enters the prompt — a
+  filename is a storage detail here and 59 of them name the wrong spec. `generate_answer` prints
+  `[ANSWER SOURCES]` (all `--answer-context` labels, since the terminal above shows only `--top-k`
+  of what the model read), prints `[ANSWER MODEL]` (which model `openrouter/free` actually picked,
+  because `openrouter/free` is a moving target and a bad route must be attributable), and then
+  `_ungrounded_citations` reports every page citation in the answer
+  (`p.15`, `pp. 15`, prose `page 6`) whose spec was never retrieved or whose page no excerpt of that
+  spec sits on. The answer is flattened to ASCII before matching — models cite with non-breaking
+  hyphens (U+2011) and narrow no-break spaces (U+202F), and an ASCII-only matcher told the user two
+  correct citations were fabricated. An answer with no citation and under 40 words is called a canned
+  router response instead of being printed as an answer: `openrouter/free` returned the literal string
+  "User Safety: safe" for a real query on 2026-10-08. Faked-openai assertions live in
+  `scripts/check_answer_grounding.py`.
 - **Spec identity comes from the PDF cover, never the filename.** 59 of the 106 doc_ids in
   `data/specs/` hold another spec's content (`MEC041.pdf` is GS MEC 040) and 52 are byte-identical
   copies of another file, so `scripts/backfill_spec_identity.py` stamps `spec_id` / `edition` /
@@ -181,7 +201,7 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
   `search.py::build_filter` excludes `is_current=false` and `_dedup_docs` spends the `--per-doc`
   quota per `content_md5`, so four aliases of one spec share a quota instead of each claiming one.
   Nothing new should key on `doc_id` alone; `doc_id` is a filename and filenames lie here.
-- **Chunk by rows, embed with context.** `chunking.py::chunk_page` packs whole markdown units, so a table row is never cut and every table chunk repeats its header and clause; prose over the limit keeps the old 300-word/40-overlap window because `dedup._stitch` trims that overlap. Sizes are bounded by an estimated token count (pipes and `<br>` are tokens), not words alone — ColBERT caps a passage at 512. What is *embedded* is `spec_id edition clause heading + body`; what is *stored* is the page markdown, and query text is never expanded (asymmetric on purpose). `identity.stamp()` runs per PDF and `is_current` starts True for everything, so **after any ingest run `scripts/backfill_spec_identity.py --apply`** — which edition is newest is only knowable once the whole corpus is in. Ingest also skips byte-identical PDFs by md5 (106 files are 54 documents).
+- **Chunk by rows, embed with context.** `chunking.py::chunk_page` packs whole markdown units, so a table row is never cut and every table chunk repeats its header and clause, and a page whose text is nothing but ETSI's furniture (running title, `_ETSI_` footer, bare page number) yields no chunk at all — 10 of the 5264 stored points were exactly that and one ranked second for a real query (`chunking._carries_signal`, and figure-only pages still count as signal because `--diagrams-only` searches through them); prose over the limit keeps the old 300-word/40-overlap window because `dedup._stitch` trims that overlap. Sizes are bounded by an estimated token count (pipes and `<br>` are tokens), not words alone — ColBERT caps a passage at 512. What is *embedded* is `spec_id edition clause heading + body`; what is *stored* is the page markdown, and query text is never expanded (asymmetric on purpose). `identity.stamp()` runs per PDF and `is_current` starts True for everything, so **after any ingest run `scripts/backfill_spec_identity.py --apply`** — which edition is newest is only knowable once the whole corpus is in. Ingest also skips byte-identical PDFs by md5 (106 files are 54 documents).
 - **Downloads are named by their cover and refused on duplicate bytes.** `identity.safe_spec_filename()`
   gives a PDF that declares a spec number the name `MEC003-<cover title>.pdf`; a white paper or slide
   deck with no number keeps the name it arrived with, because inventing an identity is what produced
