@@ -60,6 +60,8 @@ scripts/
   backfill_spec_identity.py # stamp spec_id/edition/is_current/content_md5 from the PDF cover (no re-ingest)
   deduplicate_collection.py # remove duplicate chunks in-place (no re-embed)
   audit_specs.py            # report data/specs files and manifest keys naming the wrong spec
+  dedupe_spec_pdfs.py       # delete byte-identical PDFs in data/specs (dry run by default; keeps what the index points at)
+  check_download_naming.py  # asserts identity.keep_if_new / safe_spec_filename / dedupe keepers; no models
   check_dedup_stitch.py     # asserts for dedup.py; no models, no Qdrant
   check_chunking.py         # asserts for chunking.py: rows never cut, headers repeated; no models
   check_eval_golden.py      # asserts eval_rag's golden sets are answerable from the live collection; no models
@@ -167,6 +169,13 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
   quota per `content_md5`, so four aliases of one spec share a quota instead of each claiming one.
   Nothing new should key on `doc_id` alone; `doc_id` is a filename and filenames lie here.
 - **Chunk by rows, embed with context.** `chunking.py::chunk_page` packs whole markdown units, so a table row is never cut and every table chunk repeats its header and clause; prose over the limit keeps the old 300-word/40-overlap window because `dedup._stitch` trims that overlap. Sizes are bounded by an estimated token count (pipes and `<br>` are tokens), not words alone — ColBERT caps a passage at 512. What is *embedded* is `spec_id edition clause heading + body`; what is *stored* is the page markdown, and query text is never expanded (asymmetric on purpose). `identity.stamp()` runs per PDF and `is_current` starts True for everything, so **after any ingest run `scripts/backfill_spec_identity.py --apply`** — which edition is newest is only knowable once the whole corpus is in. Ingest also skips byte-identical PDFs by md5 (106 files are 54 documents).
+- **Downloads are named by their cover and refused on duplicate bytes.** `identity.safe_spec_filename()`
+  gives a PDF that declares a spec number the name `MEC003-<cover title>.pdf`; a white paper or slide
+  deck with no number keeps the name it arrived with, because inventing an identity is what produced
+  the 106-files-are-54-documents mess. `identity.keep_if_new()` moves a temp download into place only
+  if those bytes are not already in `data/specs`, and both downloaders (`tools/monitor_deliver.py`,
+  `tools/spec_sync.py`) route through it. `scripts/dedupe_spec_pdfs.py` cleans up the copies that
+  already exist and keeps whichever one the stored chunks' `filename` points at.
 - **`openrouter/free`** is the correct model ID for the free-tier routing endpoint. Do not change it to a specific model ID unless the user requests a pinned model.
 - **`has_diagram` index** is `PayloadSchemaType.BOOL` — an older collection has it as `KEYWORD` (bug, pre-fix). Recreating the index fixes it.
 - **batch_size=16** in `ingest.py` — safe for 16 GB RAM with 300-word chunks. Do not lower without a good reason.
