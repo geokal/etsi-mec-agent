@@ -202,7 +202,9 @@ def main() -> None:
     for md5, row in rows.items():
         ident = row["ident"]
         payload = {
-            "spec_id": ident["spec_id"] if ident else None,
+            # Same rule as identity.stamp(): an unnumbered document is identified by its
+            # filename, not left with a null identity no filter or label can use.
+            "spec_id": ident["spec_id"] if ident else min(row["stems"]),
             "edition": ident["edition"] if ident else None,
             "pub_date": ident["pub_date"] if ident else None,
             "content_md5": md5,
