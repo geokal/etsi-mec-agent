@@ -268,8 +268,64 @@ been importable since before this branch (`forge_client` never existed in `etsi_
 Haystack `Tool` name was never imported), so the md5 gate would not have reached the code path it was
 meant to protect.
 
-Open: q12 is missed by all three paths in both collections; the answer still mislabels citations
-(§5e), tracked as the grounding task.
+### 5g. Citation grounding, 2026-10-08
+
+The grounding task is closed on the code side, and the earlier approach was the wrong shape: the
+prompt labelled an excerpt `MEC-003 V4.1.1 (stored as MEC023.pdf) p.15` and then *asked* the model to
+ignore the filename, while the terminal printed 5 of the 15 excerpts the model actually read. An
+aspirational rule over an unverifiable context is not a control, so `generate_answer` now does three
+things instead:
+
+- `_source_label` names an excerpt by its stamped identity alone — `MEC-003 V4.1.1 p.15` — and no
+  filename reaches the prompt at all. Undated/unsigned documents fall back to the filename, visibly.
+- The answer's own context is printed as `[ANSWER SOURCES]`, one label per excerpt, so a reader can
+  check any citation against what was actually retrieved.
+- `_ungrounded_citations` then walks every page citation in the finished answer — `p.15`, `pp. 15`, and
+  the prose `page 6` — attributes it to the nearest specification code on either side of it (citations
+  nest parentheses, so bracket matching would break, and "page 6 of MEC-016" puts the name after), and
+  separates two different faults: a specification that was never retrieved, and a page none of that
+  spec's excerpts sits on — reported with the pages it does have. A page number with no code anywhere
+  near it is reported too, since a reader cannot trace that either.
+- The answer text is flattened from typographic characters to ASCII before matching. The first live run
+  cited `ETSI\u202fGS\u202fMEC\u202f003` with narrow no-break spaces and `MEC\u2011059` with a non-breaking hyphen, and an
+  ASCII-only matcher told the user those two correct citations "named no specification" — the audit
+  was wrong, the answer was right. Documents with no ETSI number are matched by the name stamped on
+  them (`AppDevelopmentDocument_v1 p.8`), which the MEC pattern cannot see.
+
+`scripts/check_answer_grounding.py` asserts the labels and the audit's cases, and asserts the wiring
+by faking `openai` and capturing the prompt it was handed: it proves the shipped `generate_answer`
+labels its context and prints the verdict without loading a model or reaching the network. Page
+numbers need no offset — the stored `page` is the physical PDF page, which in ETSI documents is the
+number printed in the running header, as the retrieved text itself shows.
+
+Measured on the 2026-10-08 `--answer` run for q08, replayed offline through the fixed audit against
+the 15 source labels it printed: three page citations (`page 6`→MEC-016 p.6, `p.15`→MEC-003 p.15,
+`p.28`→MEC-059 p.28), **all grounded** — so that answer's defect was in the audit, not in the answer,
+and the ±1 page drift reported earlier was not reproducible.
+
+Open: q12 is missed by all three paths in both collections.
+
+---
+
+## 5h. What the first grounded runs found, 2026-10-08
+
+Both defects surfaced only because the answer's own evidence is now on screen.
+
+**The router answered with a classifier line.** `--answer` on "What is the MEP in ETSI MEC?" returned
+the literal `User Safety: safe` as `msg.content`. Nothing in the pipeline produced it and nothing in
+the output said so — the new `[CITATION CHECK] the answer cites no page numbers.` is what made it
+visible. `generate_answer` now prints `[ANSWER MODEL]` from `response.model`, so a bad route is
+attributable instead of mysterious, and an answer with no citation and under 40 words is reported as a
+canned router response rather than printed as an answer. The model ID stays `openrouter/free` (AGENTS.md);
+re-running is the remedy, since the free router is non-deterministic.
+
+**Furniture-only chunks were retrievable.** Hybrid hit 2 for that query was `MEC-040 V3.1.1 p.9`, whose
+entire body is `**_ETSI_**`. Measured against the live collection with the same predicate the chunker
+now uses: **10 of 5264 points** (0.2%) carry no signal — a negligible share that still beat real
+evidence on rank. `chunking._carries_signal` refuses such a chunk; an image reference counts as signal,
+so figure-only pages survive and `--diagrams-only` is unaffected. `scripts/drop_no_signal_chunks.py` clears the stored ones with the same imported predicate — dry run
+by default, `--apply` to delete, then a re-scan that fails loudly if any survived. The dry run on
+2026-10-08 reproduced the count independently: 10 of 5264, every example literally `**_ETSI_**`.
 
 ---
 

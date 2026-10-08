@@ -18,8 +18,12 @@ fusion inside Qdrant) → OpenRouter LLM answer.
    `min_words=150` — without that floor a dense sub-clause table shatters into one-chunk-per-row
    confetti (measured: 9854 → ~4800 chunks corpus-wide, p90 parts/page 46 → 2). Prose past the limit
    keeps the old 300-word/40-overlap window because `dedup._stitch` trims exactly that overlap.
+   `_carries_signal` refuses a chunk made of nothing but ETSI's page furniture (running title, `_ETSI_`
+   footer, bare page number) — 10 of 5264 stored points were that, and one ranked second for a real
+   query. An image reference counts as signal so figure-only pages survive `--diagrams-only`.
 3. **Store** (`src/etsi_mec_agent/store.py`): collection `QDRANT_INDEX` (default `etsi_mec_specs`, an
-   **alias** to `etsi_mec_specs_v2` since the sparse migration), three named vectors per point:
+   **alias** — since the 2026-10-08 cutover it points at `etsi_mec_prototype`, the row/clause chunks;
+   `etsi_mec_specs_old` → `etsi_mec_specs_v2` is the word-window fallback), three named vectors per point:
    - `dense` — 384-dim, Cosine, BAAI/bge-small-en-v1.5 (global recall)
    - `colbert` — 128-dim, Dot, colbertv2.0, `on_disk` (MaxSim precision re-rank)
    - `sparse` — raw term frequencies over crc32-hashed token indices; `Modifier.IDF` declared on the
@@ -36,7 +40,17 @@ fusion inside Qdrant) → OpenRouter LLM answer.
    `--answer-context` (default 15) handed to the LLM with `--per-doc` (default 2) per document, where
    the per-document quota is spent per `content_md5` so aliases of one spec share it.
    `dedup.py` (stdlib-only) does `_stitch` / `_stitch_parts` / `_dedup_docs`.
-5. **Answer**: OpenRouter, model ID `openrouter/free` (free-tier routing — don't pin a model unless asked).
+5. **Answer** (`search.py::generate_answer`): OpenRouter, model ID `openrouter/free` (free-tier routing
+   — don't pin a model unless asked). Citations are **audited, not just requested**: `_source_label`
+   names each excerpt `spec_id edition p.<page>` (never the filename — that is what `doc_id` gets
+   wrong in this corpus), the prompt header for every excerpt is echoed as `[ANSWER SOURCES]` so the
+   `--answer-context` set is visible even though only `--top-k` excerpts are printed, and
+   `_ungrounded_citations` reports each `p.<n>` in the finished answer whose spec was never retrieved
+   or whose page no excerpt of that spec sits on. The answer is flattened from typographic characters
+   to ASCII before matching (models cite with U+2011 and U+202F). `[ANSWER MODEL]` prints
+   `response.model` — the ID `openrouter/free` hides which route answered — and a no-citation answer
+   under 40 words is reported as a canned router response, because a live run returned the literal
+   `User Safety: safe` for a real query.
 
 ## Layout
 
@@ -64,6 +78,11 @@ scripts/
   audit_specs.py             manifest key vs URL/PDF content identity + coverage gaps
   check_chunking.py          asserts: rows never cut, headers repeated, clause floor; no models
   check_dedup_stitch.py      asserts: overlap trim, content_md5 alias quota; no models, no Qdrant
+  check_eval_golden.py       asserts: golden sets answerable from the live collection; stubs fastembed
+  check_download_naming.py  asserts: cover naming, md5 refusal, dedupe keepers; no models
+  check_answer_grounding.py  asserts: excerpt labels + citation audit; stubs fastembed, fakes openai
+  dedupe_spec_pdfs.py        drop byte-identical PDFs, keeping what the index references (dry run first)
+  drop_no_signal_chunks.py  delete chunks that are only ETSI page furniture (dry run first, --apply deletes)
   graph_visualize.py         force-directed spec graph → etsi_mec_graph.png
 data/
   specs/     downloaded PDFs (~120 MB, gitignored)
@@ -86,15 +105,19 @@ data/
 - Never call `client.recreate_collection()` (removed) — `delete_collection()` + `create_collection()`.
 - Config changes go in `config.py` only; new vectors need `ensure_collection` + a `scripts/backfill_*.py`;
   new CLI flags go in the relevant `main()` argparse and thread through the call chain.
-- Qdrant must run in Docker (`qdrant/qdrant`, 6333/6334, volume `./qdrant_data`) before ingest or search.
+- Qdrant must run in Docker (`qdrant/qdrant`, 6333/6334) before ingest or search, on the Docker-managed
+  volume `qdrant_storage` — **not** the repo's `./qdrant_data` bind mount, whose container was deleted
+  in early Oct 2026, so starting from that path shows an empty collection set that looks like data loss.
 - **After any ingest, run `scripts/backfill_spec_identity.py --apply`** — which edition is newest is
   only knowable once the whole corpus is in; `identity.stamp()` sets `is_current=True` for everything.
 
 ## Tooling state
 
 - **No test suite** (`# ponytail: add tests when coverage matters`) — do not run pytest. The runnable
-  checks are `scripts/check_chunking.py`, `scripts/check_dedup_stitch.py`, `backfill_spec_identity.py
-  --self-check/--verify`.
+  checks are `scripts/check_chunking.py`, `scripts/check_dedup_stitch.py`, `scripts/check_download_naming.py`,
+  `scripts/check_answer_grounding.py`, `scripts/check_eval_golden.py` (needs Qdrant read-only), and
+  `backfill_spec_identity.py --self-check/--verify`. They import the **production** symbols with
+  `fastembed` stubbed, so a green check means the shipped code path behaves, not a copy of it.
 - **Ponytail** (lazy-senior-dev, full level) always-on via `AGENTS.md`; skills in `.agents/skills/`.
 - **Serena MCP** is registered **globally** in `~/.qoder/settings.json` (`mcpServers.serena`,
   `uvx -q -p 3.13 --from git+https://github.com/oraios/serena serena start-mcp-server --context ide`),
@@ -134,5 +157,10 @@ data/
 - **Measured**: recall@5 colbert/hybrid went 10/10/11 → 11/11/12 with identity (union 14/16), and the
   prototype with row/clause chunks scored 11/10/12 @ctx15 and 11/10/13 @ctx25 *before* the floor fix.
   q08 (User app LCM proxy) and q14 (MEC platform service discovery) are missed by all three paths and
-  are provably retrieval failures, not ranking ones. The rerun + cutover (`rename_alias` then
-  `create_alias`) is the open work — see `docs/superpowers/specs/2026-10-06-corpus-wide-answering-design.md`.
+  are provably retrieval failures, not ranking ones. The cutover is **done** (`rename_alias` is rejected
+  by 1.19.1; one atomic create+delete+create moved the alias), and 52 duplicate PDFs were dropped from
+  `data/specs` with no stored chunk orphaned.
+- **Citation grounding**: `search.py::_source_label` / `_build_context` / `_ungrounded_citations` +
+  `[ANSWER SOURCES]`, checked by `scripts/check_answer_grounding.py` with `openai` faked. Whether the
+  audit finds drift in live answers is an `--answer` run away.
+  Design record: `docs/superpowers/specs/2026-10-06-corpus-wide-answering-design.md` (§5g).
