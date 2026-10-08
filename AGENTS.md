@@ -90,10 +90,19 @@ Copy `.env.example` → `.env` and fill in:
 Qdrant must be running in Docker before any ingest or search:
 
 ```powershell
-docker run -d -p 6333:6333 -p 6334:6334 `
-  -v ${PWD}/qdrant_data:/qdrant/storage `
-  qdrant/qdrant
+# The live data is in the Docker-managed volume `qdrant_storage`, NOT a repo bind mount: the
+# container that used ${PWD}/qdrant_data was deleted by an agent in early Oct 2026, so starting a
+# server on the bind mount now yields an empty collection set and looks like data loss.
+docker run -d --name qdrant -p 6333:6333 -p 6334:6334 `
+  -v qdrant_storage:/qdrant/storage `
+  qdrant/qdrant:latest
 ```
+
+Two collections live there, and `QDRANT_INDEX` names an **alias**, not a collection:
+`etsi_mec_specs` → `etsi_mec_prototype` (production, row/clause chunks) and
+`etsi_mec_specs_old` → `etsi_mec_specs_v2` (the word-window fallback). Qdrant 1.19.1 rejects
+`rename_alias`, so moving the name is one atomic `POST /collections/aliases` of
+`create_alias` + `delete_alias` + `create_alias`.
 
 ---
 
