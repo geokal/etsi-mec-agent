@@ -85,3 +85,6 @@ def download_specifications_markdown_tool() -> str:
             client.download_raw_file(proj_path, md, target)
             count += 1
     return f"Downloaded {count} markdown files from {len(projects)} ETSI Forge specification projects."
+
+
+forge_client = ETSIForgeClient()

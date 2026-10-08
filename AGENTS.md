@@ -6,7 +6,22 @@ Guidelines for AI coding agents (Gemini, Claude, Copilot, etc.) working in this 
 
 ## Repo in one sentence
 
-Local RAG pipeline over ETSI GS MEC PDFs: ingest → dual-vector Qdrant (dense + ColBERT) → hybrid search (BM25 re-rank + RRF) → OpenRouter LLM answer.
+Local RAG pipeline over ETSI GS MEC PDFs: ingest → tri-vector Qdrant (dense + ColBERT + sparse) → hybrid search (server-side RRF fusion) → OpenRouter LLM answer.
+
+---
+
+## Agent startup — the first two tool calls
+
+1. **Serena**: `activate_project` with project `etsi-mec-agent`. Serena is registered globally
+   (`~/.qoder/settings.json`) without `--project`, so nothing works until this call runs.
+   Line numbers are 0-based; `--context ide` excludes `create_text_file`/`read_file`, so brand-new
+   files use the IDE's own Write tool and every edit to existing code goes through Serena.
+2. **code-review-graph**: `get_minimal_context_tool` (~100 tokens) for node/edge counts, risk and
+   `head_matches_build`. Only call `build_or_update_graph_tool` when that flag is false.
+
+If either server's tools are missing from the session, it is a dropped connection — usually memory
+pressure from a local ingest run — not a config problem. Retry the connection from the MCP panel and
+re-check the tool list; do not edit `~/.qoder/settings.json`.
 
 ---
 
@@ -30,6 +45,9 @@ src/etsi_mec_agent/
   store.py           # Qdrant client + ensure_collection()
   ingest.py          # PDF → chunks → embed → upsert  (CLI: uv run python -m etsi_mec_agent.ingest)
   search.py          # hybrid search + LLM answer       (CLI: uv run python -m etsi_mec_agent.search)
+  dedup.py           # rank shaping (stitch + dedup) — must stay stdlib-only, so scripts/check_dedup_stitch.py runs without ONNX
+  chunking.py        # page markdown → row/clause-aware chunks; stdlib-only for scripts/check_chunking.py
+  identity.py        # spec_id / edition / pub_date read off the PDF cover (pymupdf, no ONNX)
   agent.py           # monitor entrypoint
   tools/
     clip_embed.py    # CLIP image embedder (CPU-safe, lazy-loads)
@@ -39,7 +57,18 @@ src/etsi_mec_agent/
 
 scripts/
   backfill_clip.py          # add 'clip' vectors to existing collection (no re-ingest)
+  backfill_spec_identity.py # stamp spec_id/edition/is_current/content_md5 from the PDF cover (no re-ingest)
   deduplicate_collection.py # remove duplicate chunks in-place (no re-embed)
+  audit_specs.py            # report data/specs files and manifest keys naming the wrong spec
+  dedupe_spec_pdfs.py       # delete byte-identical PDFs in data/specs (dry run by default; keeps what the index points at)
+  drop_no_signal_chunks.py  # delete chunks that are only ETSI page furniture (dry run by default, --apply deletes)
+  check_download_naming.py  # asserts identity.keep_if_new / safe_spec_filename / dedupe keepers; no models
+  check_dedup_stitch.py     # asserts for dedup.py; no models, no Qdrant
+  check_chunking.py         # asserts for chunking.py: rows never cut, headers repeated; no models
+  check_eval_golden.py      # asserts eval_rag's golden sets are answerable from the live collection; no models
+  check_answer_grounding.py # asserts generate_answer labels excerpts by cover identity and audits its own citations; no models, openai is faked
+  eval_rag.py               # golden-question recall@k, both paths + the --answer budget
+  migrate_add_sparse.py     # copy points into a new collection that has 'sparse' (no re-embed)
   graph_visualize.py        # force-directed spec relationship graph
 
 data/
@@ -63,10 +92,19 @@ Copy `.env.example` → `.env` and fill in:
 Qdrant must be running in Docker before any ingest or search:
 
 ```powershell
-docker run -d -p 6333:6333 -p 6334:6334 `
-  -v ${PWD}/qdrant_data:/qdrant/storage `
-  qdrant/qdrant
+# The live data is in the Docker-managed volume `qdrant_storage`, NOT a repo bind mount: the
+# container that used ${PWD}/qdrant_data was deleted by an agent in early Oct 2026, so starting a
+# server on the bind mount now yields an empty collection set and looks like data loss.
+docker run -d --name qdrant -p 6333:6333 -p 6334:6334 `
+  -v qdrant_storage:/qdrant/storage `
+  qdrant/qdrant:latest
 ```
+
+Two collections live there, and `QDRANT_INDEX` names an **alias**, not a collection:
+`etsi_mec_specs` → `etsi_mec_prototype` (production, row/clause chunks) and
+`etsi_mec_specs_old` → `etsi_mec_specs_v2` (the word-window fallback). Qdrant 1.19.1 rejects
+`rename_alias`, so moving the name is one atomic `POST /collections/aliases` of
+`create_alias` + `delete_alias` + `create_alias`.
 
 ---
 
@@ -82,14 +120,38 @@ uv run python -m etsi_mec_agent.ingest --skip-existing
 # Full re-ingest (wipes collection first)
 uv run python -m etsi_mec_agent.ingest --recreate-index
 
+# Ingest into another collection — there is no --index flag; everything reads QDRANT_INDEX,
+# so backfill and eval must run in the same shell
+$env:QDRANT_INDEX="etsi_mec_prototype"
+uv run python -m etsi_mec_agent.ingest data/specs --recreate-index
+
+# See what the chunker would emit — no models, no writes
+uv run python -m etsi_mec_agent.ingest data/specs/MEC003.pdf --dry-run --no-diagrams --show-chunks 3
+
 # Search
 uv run python -m etsi_mec_agent.search "What is Mp1?"
 uv run python -m etsi_mec_agent.search "Mm4 role" --use-bm25 --answer
 uv run python -m etsi_mec_agent.search "Mm4 role" --use-bm25 --answer --show-reasoning
 
+# Drop byte-identical duplicate PDFs (keepers are what the index references; dry run first)
+uv run python scripts/dedupe_spec_pdfs.py
+uv run python scripts/dedupe_spec_pdfs.py --apply
+
+# Delete the chunks the old chunker wrote from ETSI page furniture alone (dry run first)
+uv run python scripts/drop_no_signal_chunks.py
+uv run python scripts/drop_no_signal_chunks.py --apply
+
 # Clean duplicate chunks in-place (no re-embedding, ~10 min)
 uv run python scripts/deduplicate_collection.py --dry-run
 uv run python scripts/deduplicate_collection.py
+
+# Golden-question retrieval eval (recall@k for both paths + the --answer budget)
+uv run python scripts/eval_rag.py --top-k 5
+
+# Spec identity: report, then write payloads, then check search_specs honours them
+uv run python scripts/backfill_spec_identity.py
+uv run python scripts/backfill_spec_identity.py --apply
+uv run python scripts/backfill_spec_identity.py --verify
 
 # Visualise spec relationships
 uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
@@ -101,19 +163,52 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
 
 | Flag | Effect |
 |------|--------|
-| `--use-bm25` | Dense prefetch → BM25 re-rank → RRF fusion (recommended) |
+| `--use-bm25` | Dense + sparse prefetch fused inside Qdrant by RRF (recommended) |
 | `--answer` | Feed results to OpenRouter LLM |
 | `--stream` | Stream LLM answer token-by-token |
 | `--show-reasoning` | Print model thinking chain (non-stream only) |
 | `--diagrams-only` | Filter to chunks with extracted diagrams |
-| `--top-k N` | Results to return (default 5) |
+| `--top-k N` | Excerpts printed in the terminal (default 5) |
+| `--answer-context N` | Excerpts handed to the LLM with `--answer` (default 15; the terminal still prints `--top-k`) |
+| `--per-doc N` | Excerpts per document inside `--answer-context` (default 2) — all three rejected below 1 |
+| `--all-editions` | Also search superseded editions; by default chunks stamped `is_current=false` are filtered out |
 
 ---
 
 ## Key design decisions — do not change without understanding why
 
-- **Two named vectors per point**: `dense` (384-dim Cosine, global recall) + `colbert` (128-dim Dot MaxSim on_disk, precision re-rank). Both are required by the search query structure.
-- **`--use-bm25` does NOT use Haystack** — the collection was created outside Haystack and `QdrantDocumentStore` rejects it. BM25 re-ranking is implemented in stdlib `math` + `re` in `search.py::_run_hybrid_retrieval`.
+- **Three named vectors per point**: `dense` (384-dim Cosine, global recall) + `colbert` (128-dim Dot MaxSim on_disk, precision re-rank) + `sparse` (crc32-hashed raw term frequencies, `Modifier.IDF` applied server-side). `dense` + `sparse` feed the hybrid query; `colbert` feeds the re-rank path.
+- **`--use-bm25` does NOT use Haystack** — the collection was created outside Haystack and `QdrantDocumentStore` rejects it. Fusion happens inside Qdrant: `search.py::_run_hybrid_retrieval` sends two `Prefetch`es plus `FusionQuery(fusion=models.Fusion.RRF)`. `Fusion.RRF` is an enum member — passing it called (`RRF()`) raises `TypeError: 'Fusion' object is not callable`.
+- **Display and evidence are two budgets.** `search_specs` prints `_dedup_docs(stitched, keep=--top-k)` (one excerpt per document) and hands the LLM `_dedup_docs(stitched, keep=--answer-context, per_doc=--per-doc)` over the same stitched list. A page the 300-word window splits is stored as `chunk_part 1 of 2` / `2 of 2`, so `_stitch_parts()` runs first: one chunk per document used to discard the continuation and hand the LLM a table ending mid-cell.
+- **Citations are audited, not just requested.** `search.py::_source_label` names an excerpt by the
+  identity stamped on its PDF (`MEC-003 V4.1.1 p.15`) and the filename never enters the prompt — a
+  filename is a storage detail here and 59 of them name the wrong spec. `generate_answer` prints
+  `[ANSWER SOURCES]` (all `--answer-context` labels, since the terminal above shows only `--top-k`
+  of what the model read), prints `[ANSWER MODEL]` (which model `openrouter/free` actually picked,
+  because `openrouter/free` is a moving target and a bad route must be attributable), and then
+  `_ungrounded_citations` reports every page citation in the answer
+  (`p.15`, `pp. 15`, prose `page 6`) whose spec was never retrieved or whose page no excerpt of that
+  spec sits on. The answer is flattened to ASCII before matching — models cite with non-breaking
+  hyphens (U+2011) and narrow no-break spaces (U+202F), and an ASCII-only matcher told the user two
+  correct citations were fabricated. An answer with no citation and under 40 words is called a canned
+  router response instead of being printed as an answer: `openrouter/free` returned the literal string
+  "User Safety: safe" for a real query on 2026-10-08. Faked-openai assertions live in
+  `scripts/check_answer_grounding.py`.
+- **Spec identity comes from the PDF cover, never the filename.** 59 of the 106 doc_ids in
+  `data/specs/` hold another spec's content (`MEC041.pdf` is GS MEC 040) and 52 are byte-identical
+  copies of another file, so `scripts/backfill_spec_identity.py` stamps `spec_id` / `edition` /
+  `pub_date` / `content_md5` / `is_current` onto the stored points — no re-embedding. From there
+  `search.py::build_filter` excludes `is_current=false` and `_dedup_docs` spends the `--per-doc`
+  quota per `content_md5`, so four aliases of one spec share a quota instead of each claiming one.
+  Nothing new should key on `doc_id` alone; `doc_id` is a filename and filenames lie here.
+- **Chunk by rows, embed with context.** `chunking.py::chunk_page` packs whole markdown units, so a table row is never cut and every table chunk repeats its header and clause, and a page whose text is nothing but ETSI's furniture (running title, `_ETSI_` footer, bare page number) yields no chunk at all — 10 of the 5264 stored points were exactly that and one ranked second for a real query (`chunking._carries_signal`, and figure-only pages still count as signal because `--diagrams-only` searches through them); prose over the limit keeps the old 300-word/40-overlap window because `dedup._stitch` trims that overlap. Sizes are bounded by an estimated token count (pipes and `<br>` are tokens), not words alone — ColBERT caps a passage at 512. What is *embedded* is `spec_id edition clause heading + body`; what is *stored* is the page markdown, and query text is never expanded (asymmetric on purpose). `identity.stamp()` runs per PDF and `is_current` starts True for everything, so **after any ingest run `scripts/backfill_spec_identity.py --apply`** — which edition is newest is only knowable once the whole corpus is in. Ingest also skips byte-identical PDFs by md5 (106 files are 54 documents).
+- **Downloads are named by their cover and refused on duplicate bytes.** `identity.safe_spec_filename()`
+  gives a PDF that declares a spec number the name `MEC003-<cover title>.pdf`; a white paper or slide
+  deck with no number keeps the name it arrived with, because inventing an identity is what produced
+  the 106-files-are-54-documents mess. `identity.keep_if_new()` moves a temp download into place only
+  if those bytes are not already in `data/specs`, and both downloaders (`tools/monitor_deliver.py`,
+  `tools/spec_sync.py`) route through it. `scripts/dedupe_spec_pdfs.py` cleans up the copies that
+  already exist and keeps whichever one the stored chunks' `filename` points at.
 - **`openrouter/free`** is the correct model ID for the free-tier routing endpoint. Do not change it to a specific model ID unless the user requests a pinned model.
 - **`has_diagram` index** is `PayloadSchemaType.BOOL` — an older collection has it as `KEYWORD` (bug, pre-fix). Recreating the index fixes it.
 - **batch_size=16** in `ingest.py` — safe for 16 GB RAM with 300-word chunks. Do not lower without a good reason.
