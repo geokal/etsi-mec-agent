@@ -116,5 +116,19 @@ small = chunk_page("|A:|one|\n|---|---|\n|B:|two|\n")
 assert len(small) == 1 and "\n" in small[0].text, small
 assert isinstance(small[0], PageChunk)
 
+# ETSI's page furniture alone is not evidence. A page that is only footer/running title/page number
+# must yield no chunk at all, while a figure-only page keeps its chunk — that is what --diagrams-only
+# searches through.
+assert chunk_page("**_ETSI_**") == []
+assert chunk_page("**ETSI GS MEC 003 V4.1.1 (2025-05)**\n**15**\n**_ETSI_**") == []
+figure = chunk_page("**_ETSI_**\n![](data/diagrams/MEC036.pdf-0034-08.png)\n"
+                    "**Figure 6.2.2-4: Configuration option of MEP proxy**")
+assert len(figure) == 1 and "![](data/diagrams" in figure[0].text, figure
+# Real content keeps its furniture: whole chunks are dropped, chunk text is never edited.
+page = chunk_page("**ETSI GS MEC 003 V4.1.1 (2025-05)**\n**15**\n"
+                  "MEP stands for Multi-access Edge Platform.\n**_ETSI_**")
+assert len(page) == 1 and "_ETSI_" in page[0].text, page
+
 print("[check] chunk_page: rows never cut, headers repeated, 30-row round-trip, clause")
-print("[check]             propagation, prose window + overlap, token bound, newlines kept — OK")
+print("[check]             propagation, prose window + overlap, token bound, newlines kept,")
+print("[check]             furniture-only pages yield nothing — OK")

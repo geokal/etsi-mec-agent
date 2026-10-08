@@ -120,9 +120,35 @@ def _units(text: str) -> list[tuple[str, str, str, str]]:
     return units
 
 
+# ETSI's per-page furniture, which says nothing about the page it sits on.
+_FOOTER_RE = re.compile(r"^_+ETSI_+$")
+_HEADER_RE = re.compile(r"^ETSI\s+(?:GS|GR|TS|ISG)\s+MEC.*\bV\d+\.\d+\.\d+\b", re.IGNORECASE)
+_PAGENO_RE = re.compile(r"^\d{1,4}$")
+# No underscore in this class: it would eat the emphasis marks of the `_ETSI_` footer and leave the
+# word ETSI behind looking like content.
+_MARKUP_RE = re.compile(r"^[\s#*>`~.-]+|[\s#*>`~.-]+$")
+
+
+def _carries_signal(text: str) -> bool:
+    """Does any line of this chunk say something once the page furniture is removed?
+
+    An image reference counts as signal: a figure-only page is exactly what --diagrams-only is for.
+    """
+    for line in text.splitlines():
+        if "![" in line:
+            return True
+        bare = _MARKUP_RE.sub("", line.strip())
+        if bare and not (_FOOTER_RE.match(bare) or _HEADER_RE.match(bare) or _PAGENO_RE.match(bare)):
+            return True
+    return False
+
+
 def chunk_page(text: str, max_words: int = 300, overlap: int = 40, max_tokens: int = 420,
                min_words: int = 150) -> list[PageChunk]:
     """Pack indivisible units into chunks, cutting only between rows or paragraphs.
+
+    A page whose text is nothing but ETSI's per-page furniture (footer, running title, page number)
+    yields no chunk.
 
     `max_tokens` is what ColBERT's 512-token passage limit actually constrains; `max_words`
     stays for prose because that is the size the rest of the pipeline was measured at. A table
@@ -145,12 +171,18 @@ def chunk_page(text: str, max_words: int = 300, overlap: int = 40, max_tokens: i
     def close():
         if not cur:
             return
+        body = "\n".join(pieces())
         table_clauses = [cl for _, kind, cl in cur if kind == "table"]
-        chunks.append(PageChunk(
-            "\n".join(pieces()),
-            "table" if table_clauses else "prose",
-            table_clauses[0] if table_clauses else cur[0][2],
-        ))
+        # A page holding nothing but ETSI's footer, running title and page number yields no chunk:
+        # that furniture says nothing about the page, yet left alone it is retrievable evidence —
+        # measured on the live collection, a footer-only chunk ranked second for
+        # "What is the MEP in ETSI MEC?".
+        if _carries_signal(body):
+            chunks.append(PageChunk(
+                body,
+                "table" if table_clauses else "prose",
+                table_clauses[0] if table_clauses else cur[0][2],
+            ))
         cur.clear()
 
     for kind, body, header, clause in _units(text):
