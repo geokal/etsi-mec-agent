@@ -62,6 +62,7 @@ scripts/
   audit_specs.py            # report data/specs files and manifest keys naming the wrong spec
   check_dedup_stitch.py     # asserts for dedup.py; no models, no Qdrant
   check_chunking.py         # asserts for chunking.py: rows never cut, headers repeated; no models
+  check_eval_golden.py      # asserts eval_rag's golden sets are answerable from the live collection; no models
   eval_rag.py               # golden-question recall@k, both paths + the --answer budget
   migrate_add_sparse.py     # copy points into a new collection that has 'sparse' (no re-embed)
   graph_visualize.py        # force-directed spec relationship graph

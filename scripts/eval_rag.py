@@ -9,9 +9,10 @@ Exercises three retrieval paths from etsi_mec_agent.search:
               measured over the same --answer-context / --per-doc budget the CLI uses
               (defaults 15 / 2). This column is the LLM's evidence, not the --top-k printed.
 
-A question passes when a top-k chunk from the expected spec contains one of its
-expected keywords. `doc` names a content-derived spec identity (MEC-003), not a filename,
-and every path is measured behind build_filter() — the same current-editions-only filter
+A question passes when a top-k chunk from one of its expected specs contains one of its
+expected keywords. `docs` names content-derived spec identities (MEC-003), not filenames, and
+is a **set** because a term is often defined normatively in more than one live spec — scoring
+only one of them punishes a correct retrieval. Every path is measured behind build_filter() — the same current-editions-only filter
 search_specs ships — because 59 of the 106 doc_ids name a different spec than the text
 they hold. Questions whose keywords exist nowhere in the expected spec are flagged
 EVIDENCE-MISSING (bad golden data, not a retrieval failure) so the numbers stay honest.
@@ -34,28 +35,42 @@ def doc_key(meta):
     """The document a chunk belongs to: its content-derived spec, else its doc_id."""
     return (meta or {}).get("spec_id") or (meta or {}).get("doc_id", "")
 
-# doc=None means any document may satisfy the question.
 QUESTIONS = [
-    {"id": "q01", "query": "Which reference point connects the MEC application to the MEC platform?", "doc": "MEC-003", "kw": ["Mp1"]},
-    {"id": "q02", "query": "Which reference point connects the MEC platform to the MEC orchestrator?", "doc": "MEC-003", "kw": ["Mm3"]},
-    {"id": "q03", "query": "What is the Mm6 reference point used for?", "doc": "MEC-003", "kw": ["Mm6"]},
-    {"id": "q04", "query": "Which service exposes radio network information to applications?", "doc": None, "kw": ["RNIS", "Radio Network Information"]},
-    {"id": "q05", "query": "What is the Edge Enabler Client (EEC)?", "doc": None, "kw": ["Edge Enabler Client", "EEC"]},
+    # docs is the set of specs whose *current* edition defines the thing asked about; None means
+    # any document may satisfy it. Sets come from scanning the live collection, not from what the
+    # question seems to be about: "Mm6", "life cycle management api" and the RNIS requirement each
+    # live in exactly one spec, while "LCM proxy" and "MEC service" are defined in several.
+    {"id": "q01", "query": "Which reference point connects the MEC application to the MEC platform?", "docs": ["MEC-003"], "kw": ["Mp1"]},
+    {"id": "q02", "query": "Which reference point connects the MEC platform to the MEC orchestrator?", "docs": ["MEC-003"], "kw": ["Mm3"]},
+    {"id": "q03", "query": "What is the Mm6 reference point used for?", "docs": ["MEC-003"], "kw": ["Mm6"]},
+    {"id": "q04", "query": "Which service exposes radio network information to applications?", "docs": None, "kw": ["RNIS", "Radio Network Information"]},
+    {"id": "q05", "query": "What is the Edge Enabler Client (EEC)?", "docs": None, "kw": ["Edge Enabler Client", "EEC"]},
     # "TCR" occurs in no chunk of this corpus; the entity that expresses traffic influence
-    # policies toward the 5GC is the CCMF acting as an AF over Nnef_TrafficInfluence.
-    {"id": "q06", "query": "Over which 5GC service does the CCMF express application-specific traffic influence policies?", "doc": "MEC-059", "kw": ["Nnef_TrafficInfluence"]},
-    {"id": "q07", "query": "Which service continuity modes are defined for MEC applications?", "doc": None, "kw": ["service continuity"]},
-    {"id": "q08", "query": "What is the User app LCM proxy?", "doc": "MEC-003", "kw": ["LCM proxy"]},
-    {"id": "q09", "query": "How does a road tunnel affect TCP congestion control in the MEC use case?", "doc": "MEC-002", "kw": ["road tunnel", "TCP"]},
-    {"id": "q10", "query": "What are the components of the MEC host level reference architecture?", "doc": "MEC-003", "kw": ["MEC host", "Virtualisation"]},
-    {"id": "q11", "query": "What is the UU interface used for in the V2X deployment?", "doc": "MEC-030", "kw": ["uu interface"]},
+    # policies toward the 5GC is the CCMF acting as an AF over Nnef_TrafficInfluence. That
+    # service is named in MEC-059 (the CCMF spec), MEC-031 and MEC-038 (both propose it).
+    {"id": "q06", "query": "Over which 5GC service does the CCMF express application-specific traffic influence policies?", "docs": ["MEC-059", "MEC-031", "MEC-038"], "kw": ["Nnef_TrafficInfluence"]},
+    {"id": "q07", "query": "Which service continuity modes are defined for MEC applications?", "docs": None, "kw": ["service continuity"]},
+    # No single spec owns "User app LCM proxy": MEC-021 calls it a MEC system level functional
+    # entity, MEC-017 and MEC-024 describe its Mm9, MEC-003 places it in the architecture.
+    {"id": "q08", "query": "What is the User app LCM proxy?", "docs": ["MEC-003", "MEC-021", "MEC-017", "MEC-024"], "kw": ["LCM proxy"]},
+    {"id": "q09", "query": "How does a road tunnel affect TCP congestion control in the MEC use case?", "docs": ["MEC-002"], "kw": ["road tunnel", "TCP"]},
+    {"id": "q10", "query": "What are the components of the MEC host level reference architecture?", "docs": ["MEC-003"], "kw": ["MEC host", "Virtualisation"]},
+    {"id": "q11", "query": "What is the UU interface used for in the V2X deployment?", "docs": ["MEC-030"], "kw": ["uu interface"]},
     # Was kw ["Mm5", "Mm6"]: "Mm5" occurs in 56 chunks, so any of them counted as evidence and
-    # no ranking could single the selection step out. "selects the MEC host" occurs in 2.
-    {"id": "q12", "query": "Which entity selects the MEC host for application instantiation?", "doc": None, "kw": ["selects the MEC host"]},
-    {"id": "q13", "query": "How does DNS resolution steer users to the closest MEC server?", "doc": None, "kw": ["DNS"]},
-    {"id": "q14", "query": "What is the role of the MEC platform in service discovery?", "doc": "MEC-003", "kw": ["service registration", "discovery"]},
-    {"id": "q15", "query": "Which interface carries the mpInfoService between platform and orchestrator?", "doc": None, "kw": ["mpInfoService", "Mm3"]},
-    {"id": "q16", "query": "What is a MEC service and how does it relate to a MEC application?", "doc": "MEC-003", "kw": ["MEC service"]},
+    # no ranking could single the selection step out. "selects the MEC host" occurs in 2 chunks
+    # (MEC-010-2, MEC-040), and docs stays None because those two both answer it correctly — a
+    # miss here is a retrieval miss, not a golden-data miss.
+    {"id": "q12", "query": "Which entity selects the MEC host for application instantiation?", "docs": None, "kw": ["selects the MEC host"]},
+    {"id": "q13", "query": "How does DNS resolution steer users to the closest MEC server?", "docs": None, "kw": ["DNS"]},
+    # MEC-003 states the platform's role (registration enabling discovery, Mp1 in 7.2.1); MEC-011
+    # is the spec that defines the registration and discovery APIs themselves.
+    {"id": "q14", "query": "What is the role of the MEC platform in service discovery?", "docs": ["MEC-003", "MEC-011"], "kw": ["service registration", "discovery"]},
+    # Was kw ["mpInfoService", "Mm3"] with docs None: "mpInfoService" occurs in **0** chunks, so
+    # the question was scoring bare "Mm3" presence. "life cycle management api" occurs in 3 chunks,
+    # all MEC-010-2, which is what actually documents the API over Mm3/Mm3*.
+    {"id": "q15", "query": "Over which reference point does the MEC orchestrator's application life cycle management API run?", "docs": ["MEC-010-2"], "kw": ["life cycle management api"]},
+    # "A MEC service is provided and consumed" is in MEC-002, the term definition in MEC-001.
+    {"id": "q16", "query": "What is a MEC service and how does it relate to a MEC application?", "docs": ["MEC-003", "MEC-002", "MEC-001", "MEC-011"], "kw": ["MEC service"]},
 ]
 
 
@@ -80,7 +95,7 @@ def load_corpus(client):
 
 
 def evidence_ok(q, corpus):
-    docs = [q["doc"]] if q["doc"] else list(corpus)
+    docs = q["docs"] or list(corpus)
     return any(any(k.lower() in corpus.get(d, "") for k in q["kw"]) for d in docs)
 
 
@@ -112,7 +127,7 @@ def hits_aggregate(client, q_text, q_dense, ctx=15, per_doc=2):
 
 def first_hit_rank(hits, q, k):
     for rank, (doc, text) in enumerate(hits[:k], 1):
-        if q["doc"] and doc != q["doc"]:
+        if q["docs"] and doc not in q["docs"]:
             continue
         if any(kw.lower() in text.lower() for kw in q["kw"]):
             return rank
