@@ -99,6 +99,140 @@ def _run_hybrid_retrieval(
 # LLM answer generation (OpenRouter free model, OpenAI-compatible SDK)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Answer grounding — a citation must trace back to the excerpt it came from
+# ---------------------------------------------------------------------------
+
+# A window, not a bracket parser: ETSI citations nest parentheses, as in
+# "(ETSI GS MEC 003 V4.1.1 (2025-05) p.15)", so a page is attributed to the nearest spec code
+# around it — which balanced-bracket matching gets wrong.
+_CITE_WINDOW = 120
+# Models answer typographically, not in ASCII: the live run cited "MEC‑059" with a non-breaking
+# hyphen (U+2011) and "MEC 003" with a non-breaking space, and an ASCII-only matcher called those
+# two correct citations unsupported. Flatten before matching.
+_SPACE_RE = _re.compile("[\\u00a0\\u1680\\u2000-\\u200a\\u202f\\u205f\\u3000\\u200b]")
+_DASH_RE = _re.compile("[\\u2010-\\u2015\\u2212\\uff0d]")
+# "p.15", "pp. 15" and the prose form "page 6" are all citations.
+_PAGE_RE = _re.compile(r"\b(?:pp?\s*\.?\s*(\d{1,4})|pages?\s+(\d{1,4}))", _re.IGNORECASE)
+_SPEC_RE = _re.compile(r"\bMEC(?:[- ]?DEC)?[- ]?\d{3}(?:[- ]?\d)?", _re.IGNORECASE)
+
+
+def _plain(text: str) -> str:
+    """ASCII spaces and hyphens, so the matchers see what a citation means rather than how it was typed."""
+    return _DASH_RE.sub("-", _SPACE_RE.sub(" ", text))
+
+
+def _norm_spec(code: str) -> str:
+    """`MEC003`, `MEC 003`, `MEC-DEC 032-2` all become the one form `spec_id` stores."""
+    s = _re.sub(r"\s+", "-", code.upper())
+    return _re.sub(r"(\d)([A-Z])", r"\1-\2", _re.sub(r"([A-Z])(\d)", r"\1-\2", s))
+
+
+def _source_label(meta: dict) -> str:
+    """The citation an excerpt is known by: the identity printed on the PDF, never its filename."""
+    ident = meta.get("spec_id") or meta.get("filename") or "unknown"
+    page = meta.get("page", "?")
+    edition = meta.get("edition")
+    return f"{ident} {edition} p.{page}" if edition else f"{ident} p.{page}"
+
+
+def _build_context(documents: list) -> tuple:
+    """(the context block for the prompt, one citation label per excerpt in the same order)."""
+    parts, labels = [], []
+    for i, doc in enumerate(documents, 1):
+        if hasattr(doc, "meta"):
+            meta = doc.meta or {}
+            text = getattr(doc, "content", None) or meta.get("text", "")
+        else:
+            meta, text = {}, str(doc)
+        label = _source_label(meta)
+        labels.append(label)
+        header = f"--- [Source {i}] {label}"
+        if meta.get("heading"):
+            header += f" — {meta['heading']}"
+        diagrams = meta.get("diagram_paths", [])
+        if diagrams:
+            header += " — 📐 Diagram(s) available: " + ", ".join(diagrams)
+        parts.append(f"{header}\n{text}")
+    return "\n\n".join(parts), labels
+
+
+def _pages_by_spec(documents: list) -> dict:
+    """{canonical spec: {pages}} over the excerpts that carry a stamped identity."""
+    pages = {}
+    for doc in documents:
+        meta = getattr(doc, "meta", None) or {}
+        if meta.get("spec_id") and isinstance(meta.get("page"), int):
+            pages.setdefault(_norm_spec(meta["spec_id"]), set()).add(meta["page"])
+    return pages
+
+
+def _ungrounded_citations(answer: str, documents: list) -> list:
+    """Page citations the excerpts cannot support, in words a reader can act on.
+
+    A spec that was never retrieved and a known spec cited at a page none of its excerpts
+    sit on are different faults: the first is a retrieval gap, the second means the claim
+    came from somewhere other than where the answer says it did. A page is attributed to the
+    nearest specification code on either side of it, because both "(MEC-016 V3.1.1 p.6)" and
+    "page 6 of MEC-016" occur in real answers.
+    """
+    pages = _pages_by_spec(documents)
+    if not pages:
+        return []
+    answer = _plain(answer)
+    # Documents with no ETSI number — white papers and decks — are cited by the name stamped on them,
+    # which the MEC pattern cannot see, so the audit learns whatever names the context actually has.
+    others = []
+    for doc in documents:
+        spec = (getattr(doc, "meta", None) or {}).get("spec_id") or ""
+        esc = _re.escape(spec)
+        if spec and esc not in others and not _SPEC_RE.fullmatch(_norm_spec(spec)):
+            others.append(esc)
+    finder = _re.compile("|".join([_SPEC_RE.pattern] + sorted(others, key=len, reverse=True)),
+                         _re.IGNORECASE) if others else _SPEC_RE
+    codes = [(_norm_spec(m.group()), m.start(), m.end()) for m in finder.finditer(answer)]
+    complaints = []
+    for hit in _PAGE_RE.finditer(answer):
+        page = int(hit.group(1) or hit.group(2))
+        near = min(codes, key=lambda c: min(abs(c[1] - hit.start()), abs(c[2] - hit.start())),
+                   default=None)
+        if near is None or min(abs(near[1] - hit.start()), abs(near[2] - hit.start())) > _CITE_WINDOW:
+            complaints.append(f"p.{page} cited with no specification named")
+        elif near[0] not in pages:
+            complaints.append(f"{near[0]} p.{page} — no excerpt from this specification was retrieved")
+        elif page not in pages[near[0]]:
+            have = ", ".join(f"p.{p}" for p in sorted(pages[near[0]]))
+            complaints.append(f"{near[0]} p.{page} — not in that spec's excerpts (they are {have})")
+    return list(dict.fromkeys(complaints))
+
+
+def _report_grounding(answer: str, documents: list, model: str = "") -> None:
+    """Print who answered, then whether what they said traces back to the excerpts."""
+    print()
+    if model:
+        print(f"[ANSWER MODEL] {model}")
+    if not _pages_by_spec(documents):
+        print("[CITATION CHECK] skipped — the excerpts carry no stamped spec identity "
+              "(run scripts/backfill_spec_identity.py --apply).")
+        return
+    suspects = _ungrounded_citations(answer, documents)
+    cited = len(_PAGE_RE.findall(_plain(answer)))
+    words = len(answer.split())
+    if suspects:
+        print(f"[CITATION CHECK] {cited} page citation(s), {len(suspects)} unsupported:")
+        for line in suspects:
+            print(f"  ⚠ {line}")
+    elif cited:
+        print(f"[CITATION CHECK] {cited} page citation(s), all present in the excerpts above.")
+    elif words < 40:
+        # The free router sometimes answers with a classifier line instead of a generation; printed
+        # as bare text it looks like an answer. Measured 2026-10-08: "User Safety: safe".
+        print(f"[CITATION CHECK] {words} word(s) and no citation — that is a canned response from "
+              f"the router, not an answer. Re-run: openrouter/free is non-deterministic.")
+    else:
+        print("[CITATION CHECK] the answer cites no page numbers.")
+
+
 def generate_answer(query: str, documents: list, stream: bool = False, show_reasoning: bool = False) -> str:
     """
     Call OpenRouter (openrouter/free) with the retrieved ETSI MEC chunks as context.
@@ -108,6 +242,10 @@ def generate_answer(query: str, documents: list, stream: bool = False, show_reas
                                  alongside the final .content answer
     stream=True               — streams final answer token-by-token
     show_reasoning=True       — also prints the reasoning_details thinking block
+
+    The prompt is labelled with the identity printed on each PDF and the finished answer is
+    audited against those labels, because the terminal prints only --top-k of the
+    --answer-context excerpts the model actually read.
     """
     try:
         from openai import OpenAI
@@ -123,36 +261,11 @@ def generate_answer(query: str, documents: list, stream: bool = False, show_reas
 
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
 
-    # Build rich context: each chunk gets a header with its source + diagram paths
-    context_parts = []
-    for i, doc in enumerate(documents, 1):
-        if hasattr(doc, "content"):
-            text = doc.content or ""
-            meta = doc.meta or {}
-        elif hasattr(doc, "meta"):
-            text = doc.meta.get("text", "")
-            meta = doc.meta or {}
-        else:
-            text = str(doc)
-            meta = {}
-
-        # Label excerpts by what the PDF actually contains, not by the file it was saved as:
-        # 59 of this corpus's doc_ids name a different spec than the text they hold.
-        fname = meta.get("filename", "unknown")
-        ident = (f"{meta['spec_id']} {meta.get('edition')} (stored as {fname})"
-                 if meta.get("spec_id") else fname)
-        src_label = (
-            f"[Source {i}] {ident} "
-            f"p.{meta.get('page', '?')} — {meta.get('heading', '')}"
-        ).strip(" —")
-        diagrams = meta.get("diagram_paths", [])
-        diagram_note = (
-            "\n  📐 Diagram(s) available: " + ", ".join(diagrams)
-            if diagrams else ""
-        )
-        context_parts.append(f"--- {src_label}{diagram_note}\n{text}")
-
-    context_text = "\n\n".join(context_parts)
+    context_text, source_labels = _build_context(documents)
+    print(f"\n[ANSWER SOURCES] {len(source_labels)} excerpts fed to the LLM "
+          f"(only --top-k of them are printed above):")
+    for i, label in enumerate(source_labels, 1):
+        print(f"  [{i}] {label}")
 
     messages = [
         {
@@ -161,9 +274,9 @@ def generate_answer(query: str, documents: list, stream: bool = False, show_reas
                 "You are a technical writer specialising in ETSI MEC (Multi-access Edge Computing) "
                 "specifications. When answering questions:\n"
                 "• Write a comprehensive, well-structured answer of at least 3–5 paragraphs.\n"
-                "• Cite the specification and edition labelled on each [Source …] line, with its "
-                "page, e.g. (MEC-003 V4.1.1 p.18). What follows \"stored as\" is only where the PDF "
-                "sits on disk and is not the citation.\n"
+                "• Back each factual claim with the specification, edition and page copied from the "
+                "[Source …] line it came from, e.g. (MEC-003 V4.1.1 p.18). Cite only pages that "
+                "appear on those lines; if no excerpt supports a claim, leave it out.\n"
                 "• If a diagram is listed in the context (📐 Diagram(s) available: …), "
                 "reference it explicitly by filename in your answer.\n"
                 "• Use the ETSI standard terminology (reference points, functional entities, etc.).\n"
@@ -175,7 +288,6 @@ def generate_answer(query: str, documents: list, stream: bool = False, show_reas
             "content": f"Context excerpts from ETSI MEC specifications:\n\n{context_text}\n\nQuestion: {query}",
         },
     ]
-
 
     response = client.chat.completions.create(
         model="openrouter/free",
@@ -190,12 +302,16 @@ def generate_answer(query: str, documents: list, stream: bool = False, show_reas
         # come back in a non-streaming response.
         print("\n[LLM ANSWER] ", end="", flush=True)
         full = ""
+        served = ""
         for chunk in response:
+            # Which model the free router actually picked is on the stream chunks, not a header.
+            served = served or getattr(chunk, "model", "") or ""
             delta = chunk.choices[0].delta.content
             if delta:
                 print(delta, end="", flush=True)
                 full += delta
         print()
+        _report_grounding(full, documents, served)
         return full
     else:
         msg = response.choices[0].message
@@ -218,6 +334,7 @@ def generate_answer(query: str, documents: list, stream: bool = False, show_reas
                 print("-" * 65)
 
         print("\n[LLM ANSWER]", msg.content)
+        _report_grounding(msg.content or "", documents, getattr(response, "model", "") or "")
         return msg.content
 
 
