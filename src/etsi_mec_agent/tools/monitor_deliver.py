@@ -6,6 +6,8 @@ import urllib.request
 from pathlib import Path
 from typing import List, Dict
 
+from etsi_mec_agent.identity import keep_if_new, pdf_title, safe_spec_filename
+
 from .exa_search import find_etsi_pdf_url
 
 # Constants
@@ -145,20 +147,26 @@ def monitor_etsi_deliver(poll_interval: int = 3600) -> None:
                 if known_url:
                     known_version = _version_from_url(known_url)
 
-            # Local PDF is stored directly under data/specs (no extra sub‑folder)
-            local_path = DATA_SPEC_DIR / f"{found_id}.pdf"
-
+            
             # Version from the freshly discovered URL
             new_version = _version_from_url(pdf_url)
 
             # Download only when the newly found version is newer
             if new_version > known_version:
                 print(f"[monitor] new version for {spec_id}: {pdf_url} (v{new_version[0]}.{new_version[1]}.{new_version[2]})")
+                tmp = DATA_SPEC_DIR / f"{found_id}.part"
                 try:
-                    _download_pdf(pdf_url, local_path)
+                    _download_pdf(pdf_url, tmp)
                 except Exception as exc:
+                    tmp.unlink(missing_ok=True)
                     print(f"[monitor] failed to download {pdf_url}: {exc}")
                     continue
+                dest = DATA_SPEC_DIR / safe_spec_filename(found_id, tmp.name, pdf_title(tmp))
+                same_as = keep_if_new(tmp, dest, DATA_SPEC_DIR)
+                if same_as:
+                    print(f"[monitor] {found_id}: byte-identical to {same_as}, nothing saved")
+                    continue
+                print(f"[monitor] saved as {dest.name}")
                 manifest[found_id] = pdf_url
                 updated = True
         if updated:
