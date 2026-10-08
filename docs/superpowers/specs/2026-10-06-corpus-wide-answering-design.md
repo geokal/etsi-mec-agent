@@ -194,6 +194,51 @@ the best answer available — and it is attributed to the spec the text really c
 
 ---
 
+## 5e. Result after B2 and the clause floor, measured 2026-10-08
+
+`etsi_mec_prototype`: 5264 chunks over 54 documents (52 byte-identical files skipped at ingest),
+42 `spec_id`s with exactly one current edition each, zero duplicate
+`(spec_id, edition, page, chunk_part)` keys, 2309 table chunks and 2955 prose, and **p90 = 2 parts
+per page** — the pre-floor run shattered the same dense tables into 46. Ingest took 2 h 05 min.
+
+The golden set changed the same day (a single expected `doc` became a `docs` **set**, and q15 was
+rewritten because `mpInfoService` occurs in 0 chunks), so the old collection was re-measured under
+the new yardstick to make the comparison mean something:
+
+| collection | colbert | hybrid | aggregate@15 | union |
+|---|---|---|---|---|
+| `etsi_mec_specs` — word window, 4669 chunks | 12 | 12 | 14 | 16/16 |
+| `etsi_mec_prototype` — row/clause chunks, 5264 | 11 | 12 | 14 | 15/16 |
+
+**B2 is recall-neutral.** Same aggregate, same hybrid, one colbert question different: q12 moved
+colbert @3 → MISS. That is not a chunking-content difference — "selects the MEC host" sits in an
+equivalent prose chunk in both collections (same page, same part index, 283 vs 300 words), so what
+moved is either B3's `spec_id edition clause` embed prefix (empty clause here) or the ANN boundary,
+which has flipped at k=5 before.
+
+Two claims from earlier in this work need correcting. The corpus is **not** half the size of
+production: 5264 versus 4669. The 9854 figure was the pre-floor prototype's own chunk count, so the
+floor halved the *prototype*, not the live collection. And the aggregate rise from 12/16 to 14/16
+belongs to the golden-set fix, not to B1 or B2.
+
+What B2 does deliver is structural, and it stands on its own terms: a table row is never cut, every
+table chunk carries its header row and clause, identity is stamped during ingest rather than by a
+follow-up pass, and a byte-identical download never lands twice. The end-to-end proof shows the
+difference — "What is the User app LCM proxy?" now puts GS MEC 003 V4.1.1 p.15 clause 7.1.4.3 ("The
+user application lifecycle management proxy authorizes requests from device applications … and
+interacts with the OSS and the MEO") in the evidence and answers UALCMP over Mx2, where the same
+question previously answered from a document whose filename named a different spec.
+
+The defect that remains is in the answer, not the retrieval: the model quoted the sentence above but
+labelled it MEC-016 p.6, cited a p.14 excerpt as p.15, and added two clauses that occur in no chunk
+("maintains the session state …", "the first functional block …"). That is a grounding problem in
+`search.py`'s prompt and excerpt labelling, tracked separately.
+
+A's acceptance bar (two of q06/q08/q12/q14 converting) is met — by the golden-set fix. B2's bar was
+table integrity, and it is met on its own terms, not by recall.
+
+---
+
 ## 6. Out of scope here
 
 - Replacing the parser with Docling/unstructured (approach C): new heavy dependencies on a 16 GB
