@@ -79,10 +79,25 @@ for c in headered:
     body = [ln for ln in c.text.splitlines() if ln.strip().startswith("|")]
     assert re.fullmatch(r"\|[\s:|-]+\|", body[1].strip()), f"no header before the rows: {c.text[:70]}"
 
-# Clause references travel with the block, and a sub-table header re-clauses what follows it.
-by_clause = [(c.clause, c.block_kind) for c in chunk_page(TABLE, max_words=45)]
+# Clause references travel with the block, and a sub-table header re-clauses what follows it —
+# once the chunk is past the floor (min_words=20 here forces that; the default is 150).
+by_clause = [(c.clause, c.block_kind) for c in chunk_page(TABLE, max_words=45, min_words=20)]
 assert any(cl == "7.2.1" for cl, _ in by_clause), by_clause
 assert any(cl == "7.2.2" for cl, k in by_clause if k == "table"), by_clause
+
+# The floor itself. A dense annex table re-clauses every few rows; breaking at every one of
+# those turned pages into 29-54 parts and left 15-word fragments that rank badly and never
+# stitch back. Below the floor, sub-tables share a chunk and it is labelled with its first clause.
+confetti = "\n".join(
+    f"|{i}.1|Clause {i}.1 of a dense annex table|"
+    f"\n|---|---|\n|R{i}:|Row {i} of clause {i}.1, a dozen words or so in it.|"
+    for i in range(1, 5)
+)
+whole = chunk_page(confetti + "\n", max_words=300)
+assert len(whole) == 1, f"sub-clauses shattered the table into {len(whole)} chunks"
+assert whole[0].clause == "1.1", whole[0].clause
+split = chunk_page(confetti + "\n", max_words=300, min_words=10)
+assert len(split) == 4, f"the floor is not a knob: {len(split)} chunks"
 
 # Prose keeps the old window (and the 40-word overlap _stitch trims), never a 700-word run.
 prose = chunk_page(f"##### 5.1 Intro\n{PROSE}\n", max_words=300, overlap=40)
