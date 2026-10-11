@@ -139,9 +139,7 @@ data/
 
 - **Diagram capture**: `ingest.py::render_vector_figures` renders ETSI's vector box-and-arrow figures at
   200 dpi via `page.cluster_drawings()`, merges stacked raster tiles, and `_image_is_worth_keeping`
-  drops blank / sub-200px / duplicate-MD5 images plus their markdown refs. Cross-document dedup is
-  global, so a figure reprinted in an overview deck is dropped from the later document (known
-  limitation; hash→path map pending — see `mem:architecture/qdrant-schema`).
+  drops blank / sub-200px / duplicate-MD5 images plus their markdown refs. The digest set is **per PDF** (created in `ingest_single_pdf`, passed explicitly) since 2026-10-11, so a figure an overview deck reprints keeps its own file and stays findable by `--diagrams-only`; a hash→path map so a reprint points at the file already written is still deferred — disk, not retrieval (see `mem:architecture/qdrant-schema`).
 - **Sparse vector + server-side hybrid**: `scripts/migrate_add_sparse.py` exists because Qdrant 1.19
   cannot add a named vector to an existing collection.
 - **Downloader identity rule**: `tools/monitor_deliver.py` files each PDF under the spec ID its URL
@@ -164,3 +162,29 @@ data/
   `[ANSWER SOURCES]`, checked by `scripts/check_answer_grounding.py` with `openai` faked. Whether the
   audit finds drift in live answers is an `--answer` run away.
   Design record: `docs/superpowers/specs/2026-10-06-corpus-wide-answering-design.md` (§5g).
+
+### Recent additions (2026-10-11) — PR #1 review round
+
+Seven review findings, all merged into the pipeline; four changed behaviour that is easy to regress:
+
+- **`_dedup_docs` pass 1 fingerprints the whole normalised text** (image refs stripped), not a leading
+  400-char window — the row-aware chunker repeats a table's header and clause on every chunk of it, so
+  two chunks of one table share far more than 400 characters and the continuation was discarded before
+  `--per-doc` could spend its quota. Retrieval output changes, so `scripts/eval_rag.py` is the check.
+- **Download names carry the edition**: `safe_spec_filename(label, name, title, edition)` →
+  `MEC003-V4.1.1-<cover title>.pdf`. ETSI reissues a document under the same title, and without the
+  edition a new PDF overwrote the file the previously ingested chunks still named, so
+  `backfill_spec_identity.py` read the new cover and stamped it onto old text. Both downloaders pass
+  `cover_identity(pdf)["edition"]`; an unnumbered document still keeps its own name.
+- **`migrate_add_sparse.py` resolves the alias** (via `get_aliases()`) and takes `--target`, refusing to
+  run if the target collection already exists or is the source — its hard-coded `NEW` used to default
+  onto the rollback collection and upsert production points into it.
+- **`monitor_deliver.py` records the manifest entry even when the bytes are refused** by `keep_if_new`;
+  skipping that left the version test passing and re-downloaded the same release on every poll.
+- `_SPEC_RE` matches part numbers (`MEC-010-02`) and `_norm_spec` splits letter/digit boundaries and
+  strips zero padding, so the cover's `MEC 010-2` and a model's `MEC-010-02` compare equal — a widened
+  regex alone would still have failed the audit.
+- `chunk_page` skips an empty prose window: a paragraph of exactly `max_words`' multiple produced a
+  zero-word chunk that bypassed `_carries_signal`.
+
+Design record for this round: the same document, §5i.
