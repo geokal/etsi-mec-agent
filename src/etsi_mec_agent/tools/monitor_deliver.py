@@ -6,7 +6,8 @@ import urllib.request
 from pathlib import Path
 from typing import List, Dict
 
-from etsi_mec_agent.identity import cover_identity, keep_if_new, pdf_title, safe_spec_filename
+from etsi_mec_agent.identity import (canon_spec_id, cover_identity, keep_if_new, pdf_title,
+                                     safe_spec_filename)
 
 from .exa_search import find_etsi_pdf_url
 
@@ -171,6 +172,13 @@ def monitor_etsi_deliver(poll_interval: int = 3600) -> None:
                     # truncated in transit.
                     tmp.unlink(missing_ok=True)
                     print(f"[monitor] {found_id}: cannot read the cover of {pdf_url}: {exc}")
+                    continue
+                if ident and canon_spec_id(ident["spec_id"]) != canon_spec_id(found_id):
+                    # The URL names one specification and the document denies it — exactly how
+                    # MEC041.pdf came to hold GS MEC 040. Filing it under either number loses, so
+                    # refuse it loudly and leave the manifest alone: the cover outranks the URL.
+                    tmp.unlink(missing_ok=True)
+                    print(f"[monitor] {found_id}: cover declares {ident['spec_id']} - not saving {pdf_url}")
                     continue
                 dest = DATA_SPEC_DIR / safe_spec_filename(
                     found_id, tmp.name, title, ident["edition"] if ident else None)

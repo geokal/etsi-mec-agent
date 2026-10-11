@@ -19,6 +19,18 @@ HEADER = re.compile(
 )
 
 
+def canon_spec_id(spec_id: str) -> str:
+    """One comparable form for the ways ETSI writes a number.
+
+    `MEC003`, `MEC-003` and `MEC 003` name one spec, and a part is `MEC-010-02` in a deliver URL but
+    `MEC 010-2` on the cover, so separators and zero-padding both have to go before two numbers can
+    be compared. `search.py::_norm_spec` does the same job for the ids stamped on chunks; it is not
+    reused here because this module has to stay importable without the embedders.
+    """
+    s = re.sub(r"([A-Z])(\d)", r"\1-\2", re.sub(r"\s+", "-", spec_id.upper()))
+    return "-".join(p.lstrip("0") or "0" if p.isdigit() else p for p in s.split("-"))
+
+
 def cover_identity(pdf: Path, pages: int = 3) -> dict | None:
     """{spec_id, edition, pub_date, key} from the cover pages, None if unnumbered.
 
