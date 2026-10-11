@@ -161,9 +161,19 @@ def monitor_etsi_deliver(poll_interval: int = 3600) -> None:
                     tmp.unlink(missing_ok=True)
                     print(f"[monitor] failed to download {pdf_url}: {exc}")
                     continue
-                ident = cover_identity(tmp)
+                try:
+                    ident = cover_identity(tmp)
+                    title = pdf_title(tmp)
+                except Exception as exc:
+                    # A body that starts with %PDF and parses as nothing must not escape: an
+                    # exception here ends the whole polling loop, not just this spec. The release
+                    # is deliberately not recorded, so the next poll retries what may have been
+                    # truncated in transit.
+                    tmp.unlink(missing_ok=True)
+                    print(f"[monitor] {found_id}: cannot read the cover of {pdf_url}: {exc}")
+                    continue
                 dest = DATA_SPEC_DIR / safe_spec_filename(
-                    found_id, tmp.name, pdf_title(tmp), ident["edition"] if ident else None)
+                    found_id, tmp.name, title, ident["edition"] if ident else None)
                 same_as = keep_if_new(tmp, dest, DATA_SPEC_DIR)
                 if same_as:
                     print(f"[monitor] {found_id}: byte-identical to {same_as}, nothing saved")

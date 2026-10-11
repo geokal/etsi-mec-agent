@@ -78,4 +78,16 @@ with tempfile.TemporaryDirectory() as td:
     assert keepers([dup_a, dup_b], set()) == [dup_b]        # nothing indexed: shortest name wins
     assert file_md5(dup_a) == file_md5(dup_b)
 
-print("OK: cover numbering, duplicate refusal and dedupe keepers all behave.")
+# The downloaders' guard rests on this: a body that merely starts with %PDF raises rather than
+# returning None, so an unreadable download is skipped instead of filed under a guessed name.
+with tempfile.TemporaryDirectory() as td:
+    junk = Path(td) / "junk.pdf"
+    junk.write_bytes(b"%PDF" + b"\x00" * 300)
+    raised = False
+    try:
+        cover_identity(junk)
+    except Exception:
+        raised = True
+    assert raised, "a corrupt %PDF body must raise, not return None"
+
+print("OK: cover numbering, duplicate refusal, dedupe keepers and unreadable bodies all behave.")
