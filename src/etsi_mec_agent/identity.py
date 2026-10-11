@@ -74,11 +74,15 @@ def pdf_title(pdf: Path, pages: int = 2) -> str | None:
     return title or None
 
 
-def safe_spec_filename(spec_label: str | None, original_name: str, title: str | None) -> str:
-    """`MEC003-Framework-and-Reference-Architecture.pdf`, or the name it arrived with.
+def safe_spec_filename(spec_label: str | None, original_name: str, title: str | None,
+                       edition: str | None = None) -> str:
+    """`MEC003-V4.1.1-Framework-and-Reference-Architecture.pdf`, or the name it arrived with.
 
     A spec number on the cover earns the prefix; white papers, slide decks and drafts that carry
-    none keep their own name rather than get a fabricated identity.
+    none keep their own name rather than get a fabricated identity. The edition belongs in the name
+    because ETSI reissues a document under the same title: without it a new edition would replace
+    the file that the previously ingested chunks still name, and the identity backfill would then
+    read the new cover and stamp it onto the old text.
     """
     if not spec_label:
         return original_name
@@ -86,7 +90,8 @@ def safe_spec_filename(spec_label: str | None, original_name: str, title: str | 
     slug = re.sub(r"[ ;]+", "-", slug).strip("-.")
     if len(slug) > 60:                      # end on a word boundary, not mid-term
         slug = slug[:60].rsplit("-", 1)[0]
-    return f"{spec_label}-{slug}.pdf" if slug else f"{spec_label}.pdf"
+    prefix = f"{spec_label}-{edition}" if edition else spec_label
+    return f"{prefix}-{slug}.pdf" if slug else f"{prefix}.pdf"
 
 
 def file_md5(pdf: Path) -> str:

@@ -40,9 +40,21 @@ with tempfile.TemporaryDirectory() as td:
     ident = cover_identity(numbered)
     assert ident and ident["spec_id"] == "MEC-003" and ident["edition"] == "V4.1.1", ident
     label = ident["spec_id"].replace("MEC-DEC-", "MEC-DEC").replace("MEC-", "MEC", 1)
-    got = safe_spec_filename(label, numbered.name, pdf_title(numbered))
-    assert got == "MEC003-Multi-access-Edge-Computing-(MEC)-Framework-and-Reference.pdf", got
+    got = safe_spec_filename(label, numbered.name, pdf_title(numbered), ident["edition"])
+    assert got == "MEC003-V4.1.1-Multi-access-Edge-Computing-(MEC)-Framework-and-Reference.pdf", got
     assert not got[: -len(".pdf")].endswith("-"), got          # truncated on a word boundary
+
+    # The edition is in the name because ETSI reissues a document under the same title. Two editions
+    # must land as two files: sharing a name let the newer bytes replace the PDF that the older
+    # chunks still name in their payload, and the backfill then read the new cover onto old text.
+    older = make_cover(root, "old.pdf", "ETSI GS MEC 003 V3.1.1 (2023-04)",
+                       "Multi-access Edge Computing (MEC); Framework and Reference Architecture")
+    old_ident = cover_identity(older)
+    old_name = safe_spec_filename(label, older.name, pdf_title(older), old_ident["edition"])
+    assert old_name != got, (old_name, got)
+    assert old_name == "MEC003-V3.1.1-Multi-access-Edge-Computing-(MEC)-Framework-and-Reference.pdf", old_name
+    # A document whose cover declares no edition still earns the plain prefix.
+    assert safe_spec_filename("MEC003", "x.pdf", "Framework", None) == "MEC003-Framework.pdf"
 
     unnumbered = make_cover(root, "public-overview.pdf", "MEC Public Overview", "Slides, no header line")
     assert cover_identity(unnumbered) is None

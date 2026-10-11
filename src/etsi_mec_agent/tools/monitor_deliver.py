@@ -6,7 +6,7 @@ import urllib.request
 from pathlib import Path
 from typing import List, Dict
 
-from etsi_mec_agent.identity import keep_if_new, pdf_title, safe_spec_filename
+from etsi_mec_agent.identity import cover_identity, keep_if_new, pdf_title, safe_spec_filename
 
 from .exa_search import find_etsi_pdf_url
 
@@ -161,10 +161,16 @@ def monitor_etsi_deliver(poll_interval: int = 3600) -> None:
                     tmp.unlink(missing_ok=True)
                     print(f"[monitor] failed to download {pdf_url}: {exc}")
                     continue
-                dest = DATA_SPEC_DIR / safe_spec_filename(found_id, tmp.name, pdf_title(tmp))
+                ident = cover_identity(tmp)
+                dest = DATA_SPEC_DIR / safe_spec_filename(
+                    found_id, tmp.name, pdf_title(tmp), ident["edition"] if ident else None)
                 same_as = keep_if_new(tmp, dest, DATA_SPEC_DIR)
                 if same_as:
                     print(f"[monitor] {found_id}: byte-identical to {same_as}, nothing saved")
+                    # Record the release anyway: the bytes are here, but so is the knowledge that
+                    # this URL is current. Skipping it made the monitor re-download on every poll.
+                    manifest[found_id] = pdf_url
+                    updated = True
                     continue
                 print(f"[monitor] saved as {dest.name}")
                 manifest[found_id] = pdf_url

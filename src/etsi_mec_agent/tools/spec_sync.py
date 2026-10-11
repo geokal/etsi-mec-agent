@@ -10,7 +10,7 @@ try:
 except ImportError:
     _HaystackTool = None  # type: ignore
 
-from etsi_mec_agent.identity import keep_if_new, pdf_title, safe_spec_filename
+from etsi_mec_agent.identity import cover_identity, keep_if_new, pdf_title, safe_spec_filename
 from etsi_mec_agent.tools.etsi_forge import ETSIForgeClient, forge_client
 from etsi_mec_agent.tools.exa_search import find_etsi_pdf_url
 from etsi_mec_agent.tools.monitor_deliver import _spec_id_from_url
@@ -173,7 +173,9 @@ def sync_missing_specs(
                     label = _spec_id_from_url(pdf_url)   # MEC003, MEC-DEC025
                 except ValueError:
                     label = None                       # no number in the URL: keep ETSI's own name
-                dest = local_dir / safe_spec_filename(label, arrived, pdf_title(tmp))
+                ident = cover_identity(tmp)
+                dest = local_dir / safe_spec_filename(
+                    label, arrived, pdf_title(tmp), ident["edition"] if ident else None)
                 same_as = keep_if_new(tmp, dest, local_dir)
                 if same_as:
                     downloaded.append(f"[IDENTICAL TO {same_as}] {clean_key} -> {dest.name} not saved")
