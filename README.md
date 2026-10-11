@@ -22,7 +22,7 @@ Full record, including what the numbers cannot show: **[RESULTS.md](RESULTS.md)*
 | Hybrid recall@5 | 10/16 | **12/16** |
 | Union across retrieval paths | 12/16 | **15/16** |
 | Qdrant-side hybrid query (p50, 5,254 chunks) | not measured | **15 ms** |
-| Chunks indexed | 9,854 (p90 46 parts/page) | **5,254** (p90 2) |
+| Index size | 4,669 word-window chunks | **5,254** row/clause chunks, p90 2 parts/page |
 | Documents the corpus actually held | 106 files, 59 misnamed | **54**, identity read off the cover |
 
 Retrieval quality is benchmarked; answer quality is not, and `n = 16` means one question is six
