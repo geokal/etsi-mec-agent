@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from dedupe_spec_pdfs import keepers
-from etsi_mec_agent.identity import (cover_identity, file_md5, keep_if_new, pdf_title,
+from etsi_mec_agent.identity import (canon_spec_id, cover_identity, file_md5, keep_if_new, pdf_title,
                                      safe_spec_filename)
 
 
@@ -90,4 +90,13 @@ with tempfile.TemporaryDirectory() as td:
         raised = True
     assert raised, "a corrupt %PDF body must raise, not return None"
 
-print("OK: cover numbering, duplicate refusal, dedupe keepers and unreadable bodies all behave.")
+# The cover outranks the URL, and the two spell the same spec differently: the deliver file says
+# MEC003 while the cover stamps MEC-003, and a part is MEC-010-02 in the URL but MEC 010-2 on the
+# cover. Both downloaders compare on canon_spec_id and refuse a document that denies its own number.
+assert canon_spec_id("MEC003") == canon_spec_id("MEC-003") == canon_spec_id("MEC 003")
+assert canon_spec_id("MEC-010-02") == canon_spec_id("MEC 010-2")
+assert canon_spec_id("MEC-DEC025") == canon_spec_id("MEC-DEC-025")
+assert canon_spec_id("MEC040") != canon_spec_id("MEC041")
+
+print("OK: cover numbering, duplicate refusal, dedupe keepers, unreadable bodies and "
+      "URL-vs-cover disagreement all behave.")

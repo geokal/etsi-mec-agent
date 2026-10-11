@@ -10,7 +10,8 @@ try:
 except ImportError:
     _HaystackTool = None  # type: ignore
 
-from etsi_mec_agent.identity import cover_identity, keep_if_new, pdf_title, safe_spec_filename
+from etsi_mec_agent.identity import (canon_spec_id, cover_identity, keep_if_new, pdf_title,
+                                     safe_spec_filename)
 from etsi_mec_agent.tools.etsi_forge import ETSIForgeClient, forge_client
 from etsi_mec_agent.tools.exa_search import find_etsi_pdf_url
 from etsi_mec_agent.tools.monitor_deliver import _spec_id_from_url
@@ -182,6 +183,13 @@ def sync_missing_specs(
                     # in `failed`, so the next run can pick it up.
                     tmp.unlink(missing_ok=True)
                     failed.append(f"[UNREADABLE PDF] {clean_key} ({meta['name']}) - {exc}")
+                    continue
+                if ident and label and canon_spec_id(ident["spec_id"]) != canon_spec_id(label):
+                    # Same refusal as in monitor_deliver: the document denies the number its URL
+                    # claims, so neither name is safe to file it under.
+                    tmp.unlink(missing_ok=True)
+                    failed.append(f"[WRONG SPEC] {clean_key} ({meta['name']}) - cover declares "
+                                  f"{ident['spec_id']}, URL says {label}")
                     continue
                 dest = local_dir / safe_spec_filename(
                     label, arrived, title, ident["edition"] if ident else None)
