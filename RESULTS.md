@@ -84,7 +84,7 @@ milliseconds", not "sub-second".
 
 ## 5. Verification
 
-No test framework and no fixtures — 6 runnable checks, **156 assertions**, that import the
+No test framework and no fixtures — 6 runnable checks, **157 assertions**, that import the
 **production** symbols with `fastembed` stubbed, so they run in seconds on a 16 GB CPU host
 without loading a model:
 
@@ -93,7 +93,7 @@ without loading a model:
 | `check_dedup_stitch.py` | 53 | stitching, per-doc quota, whole-text fingerprint |
 | `check_answer_grounding.py` | 48 | excerpt labels, citation audit, `generate_answer` wiring with `openai` faked |
 | `check_chunking.py` | 23 | rows never cut, headers repeated, clause floor, empty-window and furniture filters |
-| `check_download_naming.py` | 15 | cover naming, edition in name, duplicate refusal, dedupe keepers |
+| `check_download_naming.py` | 16 | cover naming, edition in name, duplicate refusal, dedupe keepers, unreadable body refusing to parse quietly |
 | `check_diagram_filter.py` | 11 | blank/tiny/duplicate images, per-document dedup |
 | `check_eval_golden.py` | 6 | every golden answerable from the live collection |
 
@@ -108,7 +108,10 @@ that did not help. [PR #1](https://github.com/geokal/etsi-mec-agent/pull/1) took
 automated review: 6 accepted as found, 1 accepted-and-extended with the reason the suggested fix was
 insufficient — and **two of the seven were defects this project had introduced itself** (the 400-char
 dedup fingerprint, the run-wide image-dedup set), which is the more useful signal about how the code
-got to this state.
+got to this state. A follow-up review brought the count to eight: `cover_identity()` and
+`pdf_title()` were called outside the download guard in both fetchers, so a single unparseable PDF
+would have ended the monitor for every remaining spec — the defect the reviewer named, plus its
+sibling in `spec_sync.py` that the review did not.
 
 ## 7. What this project does not have
 
