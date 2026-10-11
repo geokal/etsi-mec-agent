@@ -58,11 +58,12 @@ def _dedup_docs(docs: list, keep: int, per_doc: int = 1) -> list:
     Two-pass deduplication of retrieved hits. Caller contract: every item in `docs` must
     expose `.content` (str) and `.meta` (dict; falsy counts as empty).
 
-    Pass 1 — text fingerprint: markdown images are stripped from the content first and
-    the first 400 chars of what remains are compared, in that order, which is why an
-    image path inside the window cannot break a match. This catches the same chunk
-    stored under different doc_ids, which is common in this corpus because each PDF
-    extraction embeds a different image path in the markdown.
+    Pass 1 — text fingerprint: markdown images are stripped and whitespace normalised, then the
+    WHOLE remaining text is compared. A leading window used to discard a table's continuation
+    chunk: the row-aware chunker deliberately repeats the header row and clause at the top of every
+    chunk of a table, so two chunks of one table share their first 400 characters and differ only
+    past them — exactly the rows the answer needed. This still catches the same chunk stored under
+    different doc_ids, which is common here because each PDF extraction embeds its own image path.
 
     Pass 2 — up to `per_doc` excerpts per document, `keep` results overall. A document is
     the chunk's `content_md5` when stamped, else its `doc_id`, and a hit with neither falls
@@ -83,7 +84,7 @@ def _dedup_docs(docs: list, keep: int, per_doc: int = 1) -> list:
     after_text = []
     for doc in docs:
         raw = doc.content or ""
-        fp = _IMG_RE.sub("", raw)[:400].strip()
+        fp = " ".join(_IMG_RE.sub("", raw).split())
         if fp not in seen_text:
             seen_text.add(fp)
             after_text.append(doc)
