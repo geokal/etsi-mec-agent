@@ -112,7 +112,9 @@ got to this state.
 
 ## 7. What this project does not have
 
-No CI, no containerised app, no packaging, no license as of 2026-10-11. One author, no users, no
-traffic, no deployment. **Answer quality is not benchmarked — retrieval is**, and the LLM is a
-free-tier router. The `batch_size` 4 → 16 ingest speedup is a code comment, not a measurement.
-q11 and q12 are still missed by at least one path each, with the causes recorded in §5b.
+No CI, no containerised app, no packaging. Licensed MIT (2026-10-11) over the code in this
+repository — the ETSI documents themselves are copyrighted by ETSI, are not committed here
+(`data/specs/` is gitignored), and are fetched by `scripts`/`tools` from ETSI's own server. One
+author, no users, no traffic, no deployment. **Answer quality is not benchmarked — retrieval is**,
+and the LLM is a free-tier router. The `batch_size` 4 → 16 ingest speedup is a code comment, not a
+measurement. q11 and q12 are still missed by at least one path each, with the causes recorded in §5b.

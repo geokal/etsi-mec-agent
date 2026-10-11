@@ -1,5 +1,7 @@
 # etsi-mec-agent
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 An intelligent indexing and RAG agent for ETSI MEC (Multi-access Edge Computing) specifications using **FastEmbed** (local ONNX embeddings), **Qdrant** in Docker, and hybrid retrieval — a `dense` + `sparse` prefetch pair fused by RRF **inside Qdrant**, plus a separate `dense` → `colbert` MaxSim re-rank path — with optional LLM answers via OpenRouter.
 
 ![Terminal demo: a hybrid search run answering 'What is the MEP?' — 15 excerpts labelled by cover identity are handed to the LLM, then the citation check reports all seven page citations as present in the retrieved excerpts](ETSI_AGENT_DEMO.gif)
