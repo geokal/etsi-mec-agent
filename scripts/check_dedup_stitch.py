@@ -75,12 +75,13 @@ assert len(capped) == 2, capped
 same = _dedup_docs(_docs([("MEC003", "xx yy zz"), ("MEC070", "xx yy zz")]), keep=5)
 assert len(same) == 1, same
 
-# The 400-char fingerprint window, characterised as it behaves today: two excerpts of one
-# doc that share a prefix longer than the window collapse in pass 1, so per_doc never gets
-# to keep the second one (see the ceiling marked in _dedup_docs).
-head = " ".join(f"t{i}" for i in range(120))  # 489 chars, i.e. longer than the window
+# The case the leading window got wrong: two chunks of one table repeat their header row and clause,
+# so they share a prefix far longer than 400 chars and differ only in the rows past it. Pass 1 used
+# to discard the second chunk — the very rows the answer needed — before per_doc ever got to spend
+# its quota. Comparing whole texts keeps both.
+head = " ".join(f"t{i}" for i in range(120))  # 489 chars, i.e. longer than the old window
 shared = _dedup_docs(_docs([("MEC003", head + " AAA"), ("MEC003", head + " BBB")]), keep=5, per_doc=2)
-assert len(shared) == 1, shared
+assert len(shared) == 2, shared
 
 # No doc_id: the fallback key is the first 40 chars of the text, so two hits sharing that
 # prefix but differing later burn a single quota while a distinct text keeps its own.
@@ -97,7 +98,7 @@ for bad in (0, -5):
 # keep is clamped the same way: 0 means "no results", not "one result" (--top-k 0).
 assert _dedup_docs(_docs([("MEC003", "aa")]), keep=0) == []
 
-# Pass 1 strips image refs, then takes the first 400 chars — order matters.
+# Pass 1 strips image refs before comparing, or two paths for one image break an identical match.
 img_a = "![d](MEC003.pdf-0035-02.png)"
 img_b = "![d](MEC079.pdf-0035-02.png)"
 body = "s" * 380          # 28 + 380 chars in, so an unstripped image path would differ
@@ -105,7 +106,7 @@ strip_only = _dedup_docs([SimpleDoc(img_a + body, {"doc_id": "MEC003"}),
                           SimpleDoc(img_b + body, {"doc_id": "MEC070"})], keep=5)
 assert len(strip_only) == 1, "differing image paths must not break the match"
 
-# 28 + 372 = exactly 400 chars, so slicing first would hide AAA/BBB and collapse both.
+# Same image ref, differing tail: these are two different excerpts, not one excerpt twice.
 mid = "s" * 372
 same_img = _dedup_docs([SimpleDoc(img_a + mid + "AAA", {"doc_id": "MEC003"}),
                         SimpleDoc(img_a + mid + "BBB", {"doc_id": "MEC003"})], keep=5, per_doc=2)
@@ -128,9 +129,9 @@ unstamped = _dedup_docs([SimpleDoc("aa bb", {"doc_id": "MEC004"}),
                         keep=5, per_doc=1)
 assert len(unstamped) == 2, "no content_md5 falls back to doc_id"
 
-print("[check] _dedup_docs: default, per_doc, keep cap, cross-id collapse, 400-char window,")
+print("[check] _dedup_docs: default, per_doc, keep cap, cross-id collapse, shared-header tails,")
 print("[check]               no-doc_id prefix bucketing, per_doc clamp, keep < 1,")
-print("[check]               strip-before-window order, content_md5 alias quota — OK")
+print("[check]               strip-before-compare order, content_md5 alias quota — OK")
 
 
 def _parts(doc_id, page, chunk_part, total_parts, text):
