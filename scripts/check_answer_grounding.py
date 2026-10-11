@@ -78,6 +78,15 @@ assert _ungrounded_citations("Defined on page 6 of MEC-016 V3.1.1.", docs) == []
 bad = _ungrounded_citations("Defined on page 99 of MEC-016 V3.1.1.", docs)
 assert len(bad) == 1 and "p.99" in bad[0], bad
 
+# A zero-padded part number names the same specification: the cover says "MEC 010-2", a model writes
+# "MEC 010-02", and the audit must not accuse the second of citing something never retrieved.
+assert _norm_spec("MEC 010-02") == "MEC-010-2" and _norm_spec("MEC-010-2") == "MEC-010-2"
+assert _norm_spec("MEC-DEC-032-02") == "MEC-DEC-032-2"
+assert _norm_spec("MEC-003") == "MEC-003"        # a 3-digit spec number is not a part: keep its zeros
+part = [SimpleDoc("MEO application lifecycle table.",
+                  {"spec_id": "MEC-010-2", "edition": "V4.1.1", "page": 150})]
+assert _ungrounded_citations("The table is in MEC 010-02 V4.1.1 p.150.", part) == []
+
 # Unnumbered documents (white papers, decks) are cited by the name stamped on them, and that
 # must resolve as well — the live context's 15th excerpt was exactly such a document.
 paper = [SimpleDoc("AppD schema walkthrough.", {"spec_id": "AppDevelopmentDocument_v1", "page": 8})]
