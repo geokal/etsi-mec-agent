@@ -192,8 +192,15 @@ def chunk_page(text: str, max_words: int = 300, overlap: int = 40, max_tokens: i
             words = body.split()
             step = max(1, max_words - overlap)
             for i in range(0, len(words), step):
+                window = " ".join(words[i : i + max_words])
+                if not window:
+                    # A word count that is an exact multiple of the step yields one empty final
+                    # slice (520 words at step 260). This path appends directly, so it never passes
+                    # through close() and its _carries_signal check — an empty chunk here would be
+                    # embedded and stored as a retrievable point.
+                    continue
                 close()
-                chunks.append(PageChunk(" ".join(words[i : i + max_words]), "prose", clause))
+                chunks.append(PageChunk(window, "prose", clause))
             continue
 
         # A clause change ends a chunk only once the chunk is substantial, so a chunk labelled
