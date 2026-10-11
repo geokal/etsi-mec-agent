@@ -104,8 +104,12 @@ docker run -d --name qdrant -p 6333:6333 -p 6334:6334 `
 Two collections live there, and `QDRANT_INDEX` names an **alias**, not a collection:
 `etsi_mec_specs` → `etsi_mec_prototype` (production, row/clause chunks) and
 `etsi_mec_specs_old` → `etsi_mec_specs_v2` (the word-window fallback). Qdrant 1.19.1 rejects
-`rename_alias`, so moving the name is one atomic `POST /collections/aliases` of
-`create_alias` + `delete_alias` + `create_alias`.
+`rename_alias`, but — probed 2026-10-11 on scratch collections — `create_alias` **re-points an alias
+that already exists** in one action, so moving a name onto a new collection is a single
+`create_alias`; the `create_alias` + `delete_alias` + `create_alias` triple is only for *renaming*
+while both collections stay alive. `delete_collection` drops its aliases silently and the name then
+resolves to nothing, so re-point before deleting; and an alias cannot take the name of a collection
+that still exists (409).
 
 ---
 
@@ -214,7 +218,15 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
   `tools/spec_sync.py`) route through it. `scripts/dedupe_spec_pdfs.py` cleans up the copies that
   already exist and keeps whichever one the stored chunks' `filename` points at. When it does decline
   a download, `tools/monitor_deliver.py` still records the URL in `manifest.json` — skipping that made
-  the same release pass the version test and re-download on every subsequent poll.
+  the same release pass the version test and re-download on every subsequent poll. (A release refused
+  because its bytes already exist *is* current and is recorded; a download whose cover cannot be
+  parsed is not, is unlinked, and is retried.) Both fetchers also refuse a download whose cover names
+  a different specification than its URL claims — `identity.canon_spec_id()` makes `MEC003`,
+  `MEC-003` and `MEC 010-2`/`MEC-010-02` comparable — because filing it under either number is how
+  `MEC041.pdf` came to hold GS MEC 040. Do **not** "fix" that by switching the manifest key or the
+  filename prefix to the cover's hyphenated form: `int(k[3:])` drives the new-spec look-ahead and
+  `glob(f"{found_id}*pdf")` drives the version comparison, so rekeying stops discovery and
+  re-downloads the corpus.
 - **Duplicate images are deduped per document, not per run.** `ingest._image_is_worth_keeping(path, seen)`
   takes the digest set of the PDF being ingested. ETSI reprints the same reference figure across specs,
   and a set shared by the whole run deleted the reprint *and* pruned its markdown reference, leaving
