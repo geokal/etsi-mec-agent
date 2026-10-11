@@ -114,7 +114,10 @@ _SPACE_RE = _re.compile("[\\u00a0\\u1680\\u2000-\\u200a\\u202f\\u205f\\u3000\\u2
 _DASH_RE = _re.compile("[\\u2010-\\u2015\\u2212\\uff0d]")
 # "p.15", "pp. 15" and the prose form "page 6" are all citations.
 _PAGE_RE = _re.compile(r"\b(?:pp?\s*\.?\s*(\d{1,4})|pages?\s+(\d{1,4}))", _re.IGNORECASE)
-_SPEC_RE = _re.compile(r"\bMEC(?:[- ]?DEC)?[- ]?\d{3}(?:[- ]?\d)?", _re.IGNORECASE)
+_SPEC_RE = _re.compile(r"\bMEC(?:[- ]?DEC)?[- ]?\d{3}(?:[- ]?\d+)?", _re.IGNORECASE)
+# A part number is canonicalised, not just matched: models write "MEC 010-02" where the cover says
+# "MEC 010-2", and the two must resolve to the same specification.
+_PART_RE = _re.compile(r"^(MEC(?:-DEC)?-\d{3})-0*(\d+)$")
 
 
 def _plain(text: str) -> str:
@@ -123,9 +126,10 @@ def _plain(text: str) -> str:
 
 
 def _norm_spec(code: str) -> str:
-    """`MEC003`, `MEC 003`, `MEC-DEC 032-2` all become the one form `spec_id` stores."""
+    """`MEC003`, `MEC 003`, `MEC-DEC 032-2`, `MEC 010-02` all become the one form `spec_id` stores."""
     s = _re.sub(r"\s+", "-", code.upper())
-    return _re.sub(r"(\d)([A-Z])", r"\1-\2", _re.sub(r"([A-Z])(\d)", r"\1-\2", s))
+    s = _re.sub(r"(\d)([A-Z])", r"\1-\2", _re.sub(r"([A-Z])(\d)", r"\1-\2", s))
+    return _PART_RE.sub(r"\1-\2", s)
 
 
 def _source_label(meta: dict) -> str:
