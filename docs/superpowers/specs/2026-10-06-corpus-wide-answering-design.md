@@ -356,7 +356,12 @@ how a fix becomes a second bug.
   every continuation of the same row group, so the second half of a long table was discarded as a
   duplicate before the `--per-doc` quota could reach it. The fingerprint is the whole normalised text
   now; the check that had asserted the old single-excerpt behaviour asserts two, with the reason beside
-  it. This changes retrieval output, so `scripts/eval_rag.py` is re-run before merging.
+  it. Re-measured on the live collection afterwards: `recall@5 colbert=11/16, hybrid=12/16,
+  aggregate@15=14/16` — identical to §5f's baseline for this collection, so the change is rank-neutral.
+  That is the most this metric can say for it: eval scores the position of the first hit, while the
+  fingerprint governs which excerpts survive into the answer, so its benefit shows in an `--answer`
+  run's `[ANSWER SOURCES]` on a long table, not in recall@5. All six model-free checks pass on the
+  fixed code, and `check_eval_golden.py` reports 16/16 goldens answerable from 42 current specs.
 - The ingest image filter deduped byte-identical renders through a module-level set that spanned the
   whole run, so a figure a white paper legitimately reprinted was deleted and its markdown reference
   pruned — the later PDF lost a diagram it genuinely contains. The set is a parameter created per PDF:
