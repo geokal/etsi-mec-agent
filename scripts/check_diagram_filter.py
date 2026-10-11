@@ -2,6 +2,7 @@
 
     uv run python scripts/check_diagram_filter.py
 """
+import hashlib
 import shutil
 import sys
 import tempfile
@@ -25,13 +26,23 @@ with tempfile.TemporaryDirectory() as td:
     dup = Path(td) / "dup.png"
     shutil.copyfile(real, dup)
 
-    assert not _image_is_worth_keeping(tiny), "sub-200px image should be rejected"
+    seen = set()   # one document's worth of digests
+    assert not _image_is_worth_keeping(tiny, seen), "sub-200px image should be rejected"
     assert not tiny.exists(), "rejected image should be deleted"
-    assert not _image_is_worth_keeping(blank), "flat blank image should be rejected"
+    assert not _image_is_worth_keeping(blank, seen), "flat blank image should be rejected"
     assert not blank.exists(), "rejected image should be deleted"
-    assert _image_is_worth_keeping(real), "genuine image should be kept"
+    assert _image_is_worth_keeping(real, seen), "genuine image should be kept"
     assert real.exists()
-    assert not _image_is_worth_keeping(dup), "byte-duplicate image should be rejected"
+    assert not _image_is_worth_keeping(dup, seen), "byte-duplicate image should be rejected"
     assert not dup.exists()
+
+    # ETSI reprints the same reference figure across specs. Those bytes are a duplicate only inside
+    # the document that first rendered them; a shared set deleted the reprint and pruned its
+    # markdown reference, so the later spec had no diagram left for --diagrams-only to find.
+    other_document = set()
+    reprint = make("reprint.png", Image.linear_gradient("L").convert("RGB").resize((400, 300)))
+    assert hashlib.md5(reprint.read_bytes()).hexdigest() == hashlib.md5(real.read_bytes()).hexdigest()
+    assert _image_is_worth_keeping(reprint, other_document), "same bytes in another document must survive"
+    assert reprint.exists()
 
 print("OK — tiny/blank/duplicate images filtered correctly")

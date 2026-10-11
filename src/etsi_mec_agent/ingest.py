@@ -44,11 +44,13 @@ def extract_primary_heading(markdown_text: str) -> str:
     return ""
 
 
-_SEEN_IMAGE_HASHES: set = set()   # module-level: dedupes boilerplate images across all PDFs in one run
+def _image_is_worth_keeping(path: Path, seen: set) -> bool:
+    """Return False (and delete the file) for blank, sub-200px, or byte-duplicate images.
 
-
-def _image_is_worth_keeping(path: Path) -> bool:
-    """Return False (and delete the file) for blank, sub-200px, or byte-duplicate images."""
+    `seen` belongs to ONE document. ETSI reprints the same reference diagram across specs, and a
+    set shared by the whole run deleted the later copy and pruned its markdown reference too, so
+    the reprint's own spec ended up with no diagram for --diagrams-only to find.
+    """
     from PIL import Image  # lazy import: Pillow arrives via fastembed
 
     keep = False
@@ -60,22 +62,22 @@ def _image_is_worth_keeping(path: Path) -> bool:
         keep = False
     if keep:
         digest = hashlib.md5(path.read_bytes()).hexdigest()
-        if digest in _SEEN_IMAGE_HASHES:
+        if digest in seen:
             keep = False
         else:
-            _SEEN_IMAGE_HASHES.add(digest)
+            seen.add(digest)
     if not keep:
         path.unlink(missing_ok=True)
     return keep
 
 
-def _prune_bad_image_refs(text: str, diagrams_dir: Path) -> str:
+def _prune_bad_image_refs(text: str, diagrams_dir: Path, seen: set) -> str:
     """Drop markdown image refs whose files were discarded by the quality filter."""
 
     def _keep(m):
         ref = Path(m.group(1))
         p = ref if ref.is_absolute() else diagrams_dir / ref.name
-        return m.group(0) if _image_is_worth_keeping(p) else ""
+        return m.group(0) if _image_is_worth_keeping(p, seen) else ""
 
     return re.sub(r"!\[.*?\]\((.*?)\)", _keep, text)
 
@@ -107,7 +109,7 @@ def _merged_tile_groups(page) -> list:
 
 # ponytail: cluster_drawings also matches vector table grids, which pass as "figures";
 # upgrade path is Docling's figure/table classification if the noise matters.
-def render_vector_figures(pdf_path: Path, diagrams_dir: Path) -> dict:
+def render_vector_figures(pdf_path: Path, diagrams_dir: Path, seen: set) -> dict:
     """Render each page's vector-drawing clusters and fragmented raster tile
     groups as whole PNGs.
 
@@ -127,7 +129,7 @@ def render_vector_figures(pdf_path: Path, diagrams_dir: Path) -> dict:
             for idx, rect in enumerate(rects):
                 out = diagrams_dir / f"{pdf_path.name}-{pno + 1:04d}-fig-{idx:02d}.png"
                 page.get_pixmap(dpi=200, clip=rect).save(str(out))
-                if _image_is_worth_keeping(out):
+                if _image_is_worth_keeping(out, seen):
                     figures.setdefault(pno + 1, []).append(str(out))
     finally:
         doc.close()
@@ -153,6 +155,7 @@ def ingest_single_pdf(
     # scripts/backfill_spec_identity.py re-decides it as a post-ingest pass.
     ident = identity_stamp(pdf_path)
     ident["content_md5"] = hashlib.md5(pdf_path.read_bytes()).hexdigest()
+    seen_images: set = set()   # duplicate images are deduped within this document, not across the run
     t0 = time.time()
 
     if skip_existing:
@@ -193,7 +196,7 @@ def ingest_single_pdf(
             print(f"    [ERROR] Failed parsing {pdf_path.name} with PyMuPDF: {e}", flush=True)
             return 0
         if not dry_run:
-            vector_figs = render_vector_figures(pdf_path, diagrams_dir)
+            vector_figs = render_vector_figures(pdf_path, diagrams_dir, seen_images)
             n_vec = sum(len(v) for v in vector_figs.values())
             if n_vec:
                 print(f"    Rendered {n_vec} vector figure(s) from drawing clusters.", flush=True)
@@ -220,7 +223,7 @@ def ingest_single_pdf(
         heading = extract_primary_heading(raw_text)
 
         if extract_diagrams and not dry_run:
-            raw_text = _prune_bad_image_refs(raw_text, diagrams_dir)
+            raw_text = _prune_bad_image_refs(raw_text, diagrams_dir, seen_images)
         vec_paths = vector_figs.get(page_num, [])
 
         # Row- and clause-aware packing: a table row is never cut and every table chunk keeps its
