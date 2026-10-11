@@ -326,6 +326,8 @@ evidence on rank. `chunking._carries_signal` refuses such a chunk; an image refe
 so figure-only pages survive and `--diagrams-only` is unaffected. `scripts/drop_no_signal_chunks.py` clears the stored ones with the same imported predicate — dry run
 by default, `--apply` to delete, then a re-scan that fails loudly if any survived. The dry run on
 2026-10-08 reproduced the count independently: 10 of 5264, every example literally `**_ETSI_**`.
+By 2026-10-11 the live collection reports **5254** points, so those 10 are gone and the chunk-time
+refusal is the only remaining defence.
 
 ---
 
