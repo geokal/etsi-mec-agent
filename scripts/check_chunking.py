@@ -116,6 +116,14 @@ small = chunk_page("|A:|one|\n|---|---|\n|B:|two|\n")
 assert len(small) == 1 and "\n" in small[0].text, small
 assert isinstance(small[0], PageChunk)
 
+# A paragraph whose word count is an exact multiple of the step (300-word window, 40-word overlap →
+# step 260) used to emit an empty final window, and this path appends directly — it never passes
+# through close(), so the furniture filter never saw it. An empty chunk would be embedded and stored.
+exact = " ".join(f"w{i}" for i in range(520))
+parts = chunk_page(exact)
+assert all(p.text.split() for p in parts), [p.text[:20] for p in parts]
+assert len(parts) == 2, len(parts)
+
 # ETSI's page furniture alone is not evidence. A page that is only footer/running title/page number
 # must yield no chunk at all, while a figure-only page keeps its chunk — that is what --diagrams-only
 # searches through.
