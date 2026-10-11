@@ -1,4 +1,4 @@
-"""Migrate the collection to add a 'sparse' BM25 vector.
+"""Migrate the collection to add the 'sparse' term-frequency vector.
 
 Qdrant cannot add a new named vector to an existing collection, so this
 copies every point (dense + colbert vectors and payload — no re-embedding)
@@ -81,12 +81,20 @@ def main():
     if copied != src:
         raise SystemExit(f"ABORT: copied {copied} but source had {src} — alias NOT switched")
 
-    client.delete_collection(source)              # deleting a collection drops its aliases
-    client.update_collection_aliases(change_aliases_operations=[
-        models.CreateAliasOperation(
-            create_alias=models.CreateAlias(collection_name=target, alias_name=alias)
-        )
-    ])
+    move = [models.CreateAliasOperation(
+        create_alias=models.CreateAlias(collection_name=target, alias_name=alias))]
+    if alias != source:
+        # Re-point, then delete. `create_alias` moves an alias that already exists, and deleting a
+        # collection drops its aliases silently — so deleting first leaves a window (and, across a
+        # crash, an indefinite state) in which everyone's QDRANT_INDEX names nothing at all.
+        # Both facts were probed against Qdrant 1.19.1 rather than assumed.
+        client.update_collection_aliases(change_aliases_operations=move)
+        client.delete_collection(source)
+    else:
+        # Here the name IS a collection, and Qdrant refuses an alias colliding with a collection
+        # name (409), so the old collection has to go before the name can be reused.
+        client.delete_collection(source)
+        client.update_collection_aliases(change_aliases_operations=move)
     print(f"[done] alias '{alias}' -> '{target}': {copied} points now carry sparse vectors")
 
 
