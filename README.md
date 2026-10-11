@@ -11,6 +11,25 @@ plain `qdrant_client`, and `QdrantDocumentStore` rejects a collection it did not
 
 ---
 
+## Results
+
+Measured on 16 golden engineering questions; reproduce with `uv run python scripts/eval_rag.py --top-k 5`.
+Full record, including what the numbers cannot show: **[RESULTS.md](RESULTS.md)**.
+
+| | start (26 Sep) | now (11 Oct) |
+|---|---|---|
+| Evidence surviving the 15-excerpt answer budget | 11/16 | **14/16** |
+| Hybrid recall@5 | 10/16 | **12/16** |
+| Union across retrieval paths | 12/16 | **15/16** |
+| Qdrant-side hybrid query (p50, 5,254 chunks) | not measured | **15 ms** |
+| Chunks indexed | 9,854 (p90 46 parts/page) | **5,254** (p90 2) |
+| Documents the corpus actually held | 106 files, 59 misnamed | **54**, identity read off the cover |
+
+Retrieval quality is benchmarked; answer quality is not, and `n = 16` means one question is six
+points. The chunker trade-off and the two still-missed questions are in RESULTS.md §1 and §7.
+
+---
+
 ## Architecture Overview
 
 The diagram below answers one onboarding question: **how does a PDF on disk become an answer on
@@ -120,7 +139,7 @@ Query: "Explain the role of Mp1 in MEC"
 > `colbert` re-ranks at the token level ("do the specific words match in context?").
 > `sparse` handles what neither embedding reliably does: rare ETSI identifiers and
 > clause numbers, where a single exact token is the whole signal. IDF is applied by
-> Qdrant over the full corpus, so a token that appears in 3 of the 5,264 chunks currently indexed is weighted
+> Qdrant over the full corpus, so a token that appears in 3 of the 5,254 chunks currently indexed is weighted
 > as rare instead of being scored inside whichever candidate set happened to be fetched.
 
 ---
@@ -447,7 +466,7 @@ Worth knowing before trusting an aggregation-style question:
   side by side. `identity.stamp()` now derives `spec_id` / `edition` / `pub_date` / `content_md5` from
   the cover for every chunk, `scripts/backfill_spec_identity.py --apply` re-decides `is_current` once
   the whole corpus is in, and ingest refuses duplicate bytes — `data/specs` is 54 files and the
-  collection 5,264 points. Superseded editions are still stored; retrieval filters them out
+  collection 5,254 points. Superseded editions are still stored; retrieval filters them out
   (`--all-editions` brings them back) and spends the `--per-doc` quota per `content_md5`, so the four
   aliases of one spec share a quota instead of each claiming one. `doc_id` remains a filename: nothing
   new should key on it.
