@@ -173,9 +173,18 @@ def sync_missing_specs(
                     label = _spec_id_from_url(pdf_url)   # MEC003, MEC-DEC025
                 except ValueError:
                     label = None                       # no number in the URL: keep ETSI's own name
-                ident = cover_identity(tmp)
+                try:
+                    ident = cover_identity(tmp)
+                    title = pdf_title(tmp)
+                except Exception as exc:
+                    # Same reason as in monitor_deliver: an unreadable download is one spec's
+                    # problem, not the whole sync's. The .part file is removed and the spec stays
+                    # in `failed`, so the next run can pick it up.
+                    tmp.unlink(missing_ok=True)
+                    failed.append(f"[UNREADABLE PDF] {clean_key} ({meta['name']}) - {exc}")
+                    continue
                 dest = local_dir / safe_spec_filename(
-                    label, arrived, pdf_title(tmp), ident["edition"] if ident else None)
+                    label, arrived, title, ident["edition"] if ident else None)
                 same_as = keep_if_new(tmp, dest, local_dir)
                 if same_as:
                     downloaded.append(f"[IDENTICAL TO {same_as}] {clean_key} -> {dest.name} not saved")
