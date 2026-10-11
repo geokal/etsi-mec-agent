@@ -68,11 +68,12 @@ scripts/
   check_eval_golden.py      # asserts eval_rag's golden sets are answerable from the live collection; no models
   check_answer_grounding.py # asserts generate_answer labels excerpts by cover identity and audits its own citations; no models, openai is faked
   eval_rag.py               # golden-question recall@k, both paths + the --answer budget
-  migrate_add_sparse.py     # copy points into a new collection that has 'sparse' (no re-embed)
+  migrate_add_sparse.py     # copy points into a new collection that has 'sparse' (no re-embed);
+  #                         # resolves the alias and refuses an existing --target rather than clobbering it
   graph_visualize.py        # force-directed spec relationship graph
 
 data/
-  specs/      # downloaded PDFs (MECxxx.pdf)
+  specs/      # downloaded PDFs (MEC003-V4.1.1-<cover title>.pdf, or their own name if unnumbered)
   diagrams/   # extracted PNG diagrams (MECxxx.pdf-PPPP-NN.png)
 ```
 
@@ -179,7 +180,7 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
 
 - **Three named vectors per point**: `dense` (384-dim Cosine, global recall) + `colbert` (128-dim Dot MaxSim on_disk, precision re-rank) + `sparse` (crc32-hashed raw term frequencies, `Modifier.IDF` applied server-side). `dense` + `sparse` feed the hybrid query; `colbert` feeds the re-rank path.
 - **`--use-bm25` does NOT use Haystack** — the collection was created outside Haystack and `QdrantDocumentStore` rejects it. Fusion happens inside Qdrant: `search.py::_run_hybrid_retrieval` sends two `Prefetch`es plus `FusionQuery(fusion=models.Fusion.RRF)`. `Fusion.RRF` is an enum member — passing it called (`RRF()`) raises `TypeError: 'Fusion' object is not callable`.
-- **Display and evidence are two budgets.** `search_specs` prints `_dedup_docs(stitched, keep=--top-k)` (one excerpt per document) and hands the LLM `_dedup_docs(stitched, keep=--answer-context, per_doc=--per-doc)` over the same stitched list. A page the 300-word window splits is stored as `chunk_part 1 of 2` / `2 of 2`, so `_stitch_parts()` runs first: one chunk per document used to discard the continuation and hand the LLM a table ending mid-cell.
+- **Display and evidence are two budgets.** `search_specs` prints `_dedup_docs(stitched, keep=--top-k)` (one excerpt per document) and hands the LLM `_dedup_docs(stitched, keep=--answer-context, per_doc=--per-doc)` over the same stitched list. A page the 300-word window splits is stored as `chunk_part 1 of 2` / `2 of 2`, so `_stitch_parts()` runs first: one chunk per document used to discard the continuation and hand the LLM a table ending mid-cell. Pass 1 of `_dedup_docs` compares the **whole** image-stripped text, not a leading 400-char window: the row-aware chunker repeats a table's header and clause at the top of every chunk of it, so two chunks of one table share far more than 400 characters and differ only in the rows past them — the window was discarding exactly the continuation the answer needed, before `--per-doc` ever got to spend its quota.
 - **Citations are audited, not just requested.** `search.py::_source_label` names an excerpt by the
   identity stamped on its PDF (`MEC-003 V4.1.1 p.15`) and the filename never enters the prompt — a
   filename is a storage detail here and 59 of them name the wrong spec. `generate_answer` prints
@@ -203,12 +204,21 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
   Nothing new should key on `doc_id` alone; `doc_id` is a filename and filenames lie here.
 - **Chunk by rows, embed with context.** `chunking.py::chunk_page` packs whole markdown units, so a table row is never cut and every table chunk repeats its header and clause, and a page whose text is nothing but ETSI's furniture (running title, `_ETSI_` footer, bare page number) yields no chunk at all — 10 of the 5264 stored points were exactly that and one ranked second for a real query (`chunking._carries_signal`, and figure-only pages still count as signal because `--diagrams-only` searches through them); prose over the limit keeps the old 300-word/40-overlap window because `dedup._stitch` trims that overlap. Sizes are bounded by an estimated token count (pipes and `<br>` are tokens), not words alone — ColBERT caps a passage at 512. What is *embedded* is `spec_id edition clause heading + body`; what is *stored* is the page markdown, and query text is never expanded (asymmetric on purpose). `identity.stamp()` runs per PDF and `is_current` starts True for everything, so **after any ingest run `scripts/backfill_spec_identity.py --apply`** — which edition is newest is only knowable once the whole corpus is in. Ingest also skips byte-identical PDFs by md5 (106 files are 54 documents).
 - **Downloads are named by their cover and refused on duplicate bytes.** `identity.safe_spec_filename()`
-  gives a PDF that declares a spec number the name `MEC003-<cover title>.pdf`; a white paper or slide
+  gives a PDF that declares a spec number the name `MEC003-V4.1.1-<cover title>.pdf` — the edition is
+  part of the name because ETSI reissues a document under the same title, and without it a new edition
+  replaced the file that the previously ingested chunks still named, letting the identity backfill read
+  the new cover and stamp it onto the old text. A white paper or slide
   deck with no number keeps the name it arrived with, because inventing an identity is what produced
   the 106-files-are-54-documents mess. `identity.keep_if_new()` moves a temp download into place only
   if those bytes are not already in `data/specs`, and both downloaders (`tools/monitor_deliver.py`,
   `tools/spec_sync.py`) route through it. `scripts/dedupe_spec_pdfs.py` cleans up the copies that
-  already exist and keeps whichever one the stored chunks' `filename` points at.
+  already exist and keeps whichever one the stored chunks' `filename` points at. When it does decline
+  a download, `tools/monitor_deliver.py` still records the URL in `manifest.json` — skipping that made
+  the same release pass the version test and re-download on every subsequent poll.
+- **Duplicate images are deduped per document, not per run.** `ingest._image_is_worth_keeping(path, seen)`
+  takes the digest set of the PDF being ingested. ETSI reprints the same reference figure across specs,
+  and a set shared by the whole run deleted the reprint *and* pruned its markdown reference, leaving
+  the later spec with no diagram for `--diagrams-only` to find.
 - **`openrouter/free`** is the correct model ID for the free-tier routing endpoint. Do not change it to a specific model ID unless the user requests a pinned model.
 - **`has_diagram` index** is `PayloadSchemaType.BOOL` — an older collection has it as `KEYWORD` (bug, pre-fix). Recreating the index fixes it.
 - **batch_size=16** in `ingest.py` — safe for 16 GB RAM with 300-word chunks. Do not lower without a good reason.
