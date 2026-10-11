@@ -10,8 +10,11 @@ try:
 except ImportError:
     _HaystackTool = None  # type: ignore
 
+from etsi_mec_agent.identity import (canon_spec_id, cover_identity, keep_if_new, pdf_title,
+                                     safe_spec_filename)
 from etsi_mec_agent.tools.etsi_forge import ETSIForgeClient, forge_client
 from etsi_mec_agent.tools.exa_search import find_etsi_pdf_url
+from etsi_mec_agent.tools.monitor_deliver import _spec_id_from_url
 
 # Standard registry of ETSI MEC specifications and corresponding Forge repos
 MEC_SPEC_CATALOG = {
@@ -163,11 +166,39 @@ def sync_missing_specs(
         if download_format in ["pdf", "all"] and not success:
             pdf_url = find_etsi_pdf_url(f"GS {clean_key}")
             if pdf_url:
-                pdf_filename = pdf_url.split("/")[-1]
-                pdf_dest = local_dir / pdf_filename
-                if download_direct_pdf(pdf_url, pdf_dest):
-                    downloaded.append(f"[DOWNLOADED PDF] {clean_key} -> {pdf_filename}")
-                    success = True
+                arrived = pdf_url.split("/")[-1]
+                tmp = local_dir / f"{clean_key}.part"
+                if not download_direct_pdf(pdf_url, tmp):
+                    continue
+                try:
+                    label = _spec_id_from_url(pdf_url)   # MEC003, MEC-DEC025
+                except ValueError:
+                    label = None                       # no number in the URL: keep ETSI's own name
+                try:
+                    ident = cover_identity(tmp)
+                    title = pdf_title(tmp)
+                except Exception as exc:
+                    # Same reason as in monitor_deliver: an unreadable download is one spec's
+                    # problem, not the whole sync's. The .part file is removed and the spec stays
+                    # in `failed`, so the next run can pick it up.
+                    tmp.unlink(missing_ok=True)
+                    failed.append(f"[UNREADABLE PDF] {clean_key} ({meta['name']}) - {exc}")
+                    continue
+                if ident and label and canon_spec_id(ident["spec_id"]) != canon_spec_id(label):
+                    # Same refusal as in monitor_deliver: the document denies the number its URL
+                    # claims, so neither name is safe to file it under.
+                    tmp.unlink(missing_ok=True)
+                    failed.append(f"[WRONG SPEC] {clean_key} ({meta['name']}) - cover declares "
+                                  f"{ident['spec_id']}, URL says {label}")
+                    continue
+                dest = local_dir / safe_spec_filename(
+                    label, arrived, title, ident["edition"] if ident else None)
+                same_as = keep_if_new(tmp, dest, local_dir)
+                if same_as:
+                    downloaded.append(f"[IDENTICAL TO {same_as}] {clean_key} -> {dest.name} not saved")
+                else:
+                    downloaded.append(f"[DOWNLOADED PDF] {clean_key} -> {dest.name}")
+                success = True
 
         if not success:
             failed.append(f"[UNAVAILABLE] {clean_key} ({meta['name']}) - no direct download found.")
@@ -185,8 +216,12 @@ def sync_missing_specs(
     return "\n".join(report_lines)
 
 
-# Native Haystack Tool
-sync_missing_specs_tool = Tool(
+def _plain_tool(**kwargs):
+    return kwargs["function"]
+
+
+# The module has to import without haystack-ai installed (AGENTS.md), so the wrapper is optional.
+sync_missing_specs_tool = (_HaystackTool or _plain_tool)(
     name="sync_missing_etsi_specs",
     description="Scan the local ETSI data directory (data/specs), detect missing MEC specifications, and download only the missing documents or OpenAPI files from ETSI Forge.",
     parameters={
