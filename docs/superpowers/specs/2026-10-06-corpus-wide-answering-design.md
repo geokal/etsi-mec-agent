@@ -329,6 +329,55 @@ by default, `--apply` to delete, then a re-scan that fails loudly if any survive
 
 ---
 
+## 5i. The PR #1 review round, 2026-10-11
+
+Seven inline findings came back from the automated review. Each was checked against the code before
+being acted on, and one is recorded as only partly right — accepting a finding that does not hold is
+how a fix becomes a second bug.
+
+**Fixed as found:**
+
+- `scripts/migrate_add_sparse.py` used one variable for both the alias and the collection and wrote the
+  copy into a hard-coded `NEW`, so with the documented live setup the default run upserted production
+  points into `etsi_mec_specs_v2` — the rollback — before its own count check. It now resolves
+  `QDRANT_INDEX` through `get_aliases()` to the collection behind it, takes `--target`, and refuses to
+  run when the target exists or equals the source.
+- `identity.safe_spec_filename()` keyed the destination on the spec number and title alone, so a new
+  edition that keeps its title (most of them do) landed on the file its predecessor owned, and because
+  `keep_if_new()`'s duplicate scan excludes the destination by design, `tmp.replace(dest)` overwrote
+  bytes that stored chunks still point at. The edition is now part of the name
+  (`MEC003-V4.1.1-<cover title>.pdf`) and both downloaders read it off the cover before choosing.
+- `chunking.chunk_page`'s prose window emitted an empty final slice whenever a paragraph's word count is
+  an exact multiple of the step, and that slice bypassed both the `close()` flush and `_carries_signal`,
+  so a zero-word body reached the index as an embeddable point. Empty windows are skipped and asserted
+  for at 520 words.
+- `dedup._dedup_docs` pass 1 fingerprinted the first 400 characters after stripping image references.
+  For a row-aware table chunk those 400 characters are the repeated header and clause, identical across
+  every continuation of the same row group, so the second half of a long table was discarded as a
+  duplicate before the `--per-doc` quota could reach it. The fingerprint is the whole normalised text
+  now; the check that had asserted the old single-excerpt behaviour asserts two, with the reason beside
+  it. This changes retrieval output, so `scripts/eval_rag.py` is re-run before merging.
+- The ingest image filter deduped byte-identical renders through a module-level set that spanned the
+  whole run, so a figure a white paper legitimately reprinted was deleted and its markdown reference
+  pruned — the later PDF lost a diagram it genuinely contains. The set is a parameter created per PDF:
+  duplicates within one document still collapse, reprints across documents survive. The reviewer's
+  other option (hash→path so every document references one file) stays deferred in §6.
+- `tools/monitor_deliver.py` left the manifest untouched when a download turned out byte-identical to a
+  file already on disk, so the same newer version passed the version comparison on every later poll and
+  re-fetched the same bytes. It now records the URL and reports that nothing was saved.
+
+**Partly right:** `search.py::_SPEC_RE` could not see ETSI part numbers, so a citation to `MEC-010-02`
+matched only `MEC-010` and the audit complained about an excerpt it had been given. The regex is widened
+as suggested — and that alone is not enough: the cover stamps whatever the PDF prints, and ETSI is
+inconsistent about zero-padding (`MEC 010-2` on the cover, `MEC-010-02` from the model), so the
+comparison is done on `_norm_spec`, which splits letter/digit boundaries and strips the padding so both
+spellings and both orders compare equal.
+
+**No findings from the second reviewer.** It posted a summary and zero inline comments — on its Free
+plan it publishes review bodies only — so the absence of findings is not agreement.
+
+---
+
 ## 6. Out of scope here
 
 - Replacing the parser with Docling/unstructured (approach C): new heavy dependencies on a 16 GB
@@ -339,7 +388,9 @@ by default, `--apply` to delete, then a re-scan that fails loudly if any survive
   explicit request, plus VLM captioning at ingest.
 - Re-downloading the 29 spec numbers never fetched. The downloader is repaired; fetching is a
   network run the user triggers separately.
-- Cross-document diagram dedup (hash→path) so overview decks keep reprinted figures.
+- Cross-document diagram dedup (hash→path) so a figure reprinted in an overview deck points at the file
+  the spec already wrote instead of a second byte-identical copy. Dedup is per document now (§5i), which
+  keeps the reference; this is about not storing the same PNG twice.
 
 ## 7. Risks
 

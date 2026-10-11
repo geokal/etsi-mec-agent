@@ -128,7 +128,10 @@ Query: "Explain the role of Mp1 in MEC"
 ## Components
 
 - **Document Parser**: **PyMuPDF4LLM** extracts layout-aware Markdown, tables, and embedded raster images.
-- **Diagram Capture**: `render_vector_figures()` renders the vector drawings ETSI specs actually use (box-and-arrow figures are not embedded rasters) at 200 dpi and merges adjacent raster tiles into a single whole figure; `_image_is_worth_keeping()` drops blank, sub-200px, and duplicate images.
+- **Diagram Capture**: `render_vector_figures()` renders the vector drawings ETSI specs actually use (box-and-arrow figures are not embedded rasters) at 200 dpi and merges adjacent raster tiles into a single whole figure; `_image_is_worth_keeping()` drops blank, sub-200px, and byte-duplicate images —
+  duplicate *within the document being ingested*: ETSI reprints the same reference figure across specs, and a
+  set shared by the whole run deleted the reprint and pruned its markdown reference, leaving that spec with
+  no diagram for `--diagrams-only` to find.
 - **Chunking**: `chunking.chunk_page()` packs whole units — a markdown table row, a paragraph, a heading — so a row is never cut mid-cell and every table chunk carries its clause and header row. Prose over the limit still uses the 300-word window with 40-word overlap, and sizes are held by a token estimate (pipes and `<br>` count), not just a word count, because ColBERT caps a passage at 512 tokens. A clause change only starts a new
   chunk once the chunk holds `min_words=150`, which is what stopped dense sub-clause tables shattering into
   one-row confetti (measured corpus-wide: 9,854 → ~4,800 chunks, p90 parts-per-page 46 → 2).
@@ -330,7 +333,9 @@ $env:EXA_API_KEY = "<your-exa-key>"
 uv run python -m etsi_mec_agent.agent --watch-deliver 5   # press Ctrl‑C after a few cycles
 ```
 Downloads are named from the PDF's own cover, never from the number that was asked for: a document that
-declares one lands as `MEC003-<cover title>.pdf`, and a white paper or slide deck that declares nothing
+declares one lands as `MEC003-V4.1.1-<cover title>.pdf` — the edition is in the name because ETSI
+reissues documents under the same title, and without it a new edition replaced the file older chunks still
+named — and a white paper or slide deck that declares nothing
 keeps the name it arrived with (inventing an identity is what produced 106 files for 54 documents).
 `identity.keep_if_new()` refuses bytes already present in `data/specs` by md5, so the same document under
 a second name never enters the corpus again. `manifest.json` tracks the last known version URL per spec,
