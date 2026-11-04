@@ -84,7 +84,7 @@ milliseconds", not "sub-second".
 
 ## 5. Verification
 
-No test framework and no fixtures — 6 runnable checks, **161 assertions**, that import the
+No test framework and no fixtures — 7 runnable checks, **169 assertions**, that import the
 **production** symbols with `fastembed` stubbed, so they run in seconds on a 16 GB CPU host
 without loading a model:
 
@@ -95,9 +95,10 @@ without loading a model:
 | `check_chunking.py` | 23 | rows never cut, headers repeated, clause floor, empty-window and furniture filters |
 | `check_download_naming.py` | 20 | cover naming, edition in name, duplicate refusal, dedupe keepers, unreadable body, URL-vs-cover disagreement |
 | `check_diagram_filter.py` | 11 | blank/tiny/duplicate images, per-document dedup |
+| `check_migrate_sparse.py` | 8 | migration rebuilds each sparse vector with the cover identity ingest prefixes |
 | `check_eval_golden.py` | 6 | every golden answerable from the live collection |
 
-    for s in chunking dedup_stitch diagram_filter download_naming answer_grounding eval_golden; do uv run python scripts/check_$s.py; done
+    for s in chunking dedup_stitch diagram_filter download_naming answer_grounding migrate_sparse eval_golden; do uv run python scripts/check_$s.py; done
 
 ## 6. Process
 
@@ -115,7 +116,14 @@ leaving the searched name pointing at nothing across a crash; and nothing checke
 document's cover against the number its URL claimed — the failure that produced `MEC041.pdf` holding
 GS MEC 040. Each was verified against the code, the live corpus or the server before being changed;
 one had already been fixed by the pass before it, and one was applied differently than asked because
-the literal instruction would have broken new-spec discovery.
+the literal instruction would have broken new-spec discovery. A third reviewer (CodeRabbit) then
+found an eleventh, in the same migration script: it rebuilt each point's sparse vector from the
+stored body alone, dropping the `spec_id edition clause heading` prefix that ingest tokenises into
+it, so a migrated chunk would not match a bare clause-number query the way a freshly ingested one
+does. The rebuild now reassembles that prefix from the payload's identity fields, pinned by
+`check_migrate_sparse.py`; the migration is historical (`sparse` is already declared on the live
+collection), so this is verified by the model-free check and by reading, not by a run against the
+storage volume.
 
 ## 7. What this project does not have
 

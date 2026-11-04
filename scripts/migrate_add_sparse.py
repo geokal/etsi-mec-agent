@@ -35,6 +35,21 @@ def resolve_collection(client, name: str) -> str:
     return name
 
 
+def _embed_text(payload: dict) -> str:
+    """Rebuild the text ingest embedded, so a migrated sparse vector matches a fresh one.
+
+    ingest.py prefixes every chunk with `spec_id edition clause heading` before tokenising it, but
+    the stored payload keeps only the body under "text". Reassembling that prefix from the identity
+    fields is what stops a migrated chunk losing its cover-derived spec number in the sparse vector.
+    """
+    context = " ".join(filter(None, [
+        payload.get("spec_id"), payload.get("edition"),
+        payload.get("clause"), payload.get("heading"),
+    ]))
+    body = payload.get("text", "")
+    return f"{context}\n{body}" if context else body
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--target", default=NEW,
@@ -68,7 +83,7 @@ def main():
             client.upsert(collection_name=target, points=[
                 models.PointStruct(
                     id=p.id,
-                    vector={**p.vector, "sparse": _token_sparse(p.payload.get("text", ""))},
+                    vector={**p.vector, "sparse": _token_sparse(_embed_text(p.payload))},
                     payload=p.payload,
                 )
                 for p in pts
