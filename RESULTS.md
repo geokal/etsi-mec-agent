@@ -39,7 +39,7 @@ the metric does not score.
     uv run python scripts/check_eval_golden.py
 
 54 PDFs · **42 `spec_id`s with exactly one current edition each** · 5,254 chunks (2,309 table,
-2,955 prose) · 689,731 words of current text · 3,068 extracted diagrams (370 MB) · zero duplicate
+2,955 prose) · 689,725 words of current text · 3,068 extracted diagrams (370 MB) · zero duplicate
 `(spec_id, edition, page, chunk_part)` keys.
 
 Corpus defects found and fixed, which is most of what the work was:
