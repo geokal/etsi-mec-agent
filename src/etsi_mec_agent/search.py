@@ -1,4 +1,5 @@
 import argparse
+import functools
 import os
 import time
 import zlib
@@ -11,6 +12,9 @@ from etsi_mec_agent.dedup import SimpleDoc, _dedup_docs, _stitch_parts
 from etsi_mec_agent.store import get_qdrant_client
 
 
+# lru_cache: Streamlit reruns the whole script per interaction and the ONNX embedders cost
+# ~30–60 s cold; the CLI calls this once per process either way.
+@functools.lru_cache(maxsize=1)
 def get_embedders():
     dense_model = TextEmbedding(settings.dense_model)
     colbert_model = LateInteractionTextEmbedding(settings.colbert_model)
@@ -92,7 +96,9 @@ def _run_hybrid_retrieval(
         query_filter=query_filter,
     )
 
-    return [SimpleDoc(h.payload.get("text", ""), h.payload) for h in results.points]
+    # The fused RRF score rides along in meta so the UI can display it; a stitched run keeps
+    # the first part's score, and dedup/grounding ignore the extra key.
+    return [SimpleDoc(h.payload.get("text", ""), {**h.payload, "score": h.score}) for h in results.points]
 
 
 # ---------------------------------------------------------------------------
@@ -237,20 +243,8 @@ def _report_grounding(answer: str, documents: list, model: str = "") -> None:
         print("[CITATION CHECK] the answer cites no page numbers.")
 
 
-def generate_answer(query: str, documents: list, stream: bool = False, show_reasoning: bool = False) -> str:
-    """
-    Call OpenRouter (openrouter/free) with the retrieved ETSI MEC chunks as context.
-
-    model="openrouter/free"   — confirmed correct per OpenRouter docs
-    reasoning.enabled=True    — model returns reasoning_details (thinking chain)
-                                 alongside the final .content answer
-    stream=True               — streams final answer token-by-token
-    show_reasoning=True       — also prints the reasoning_details thinking block
-
-    The prompt is labelled with the identity printed on each PDF and the finished answer is
-    audited against those labels, because the terminal prints only --top-k of the
-    --answer-context excerpts the model actually read.
-    """
+def _llm_client():
+    """OpenAI-compatible client for the configured endpoint (default: OpenRouter free router)."""
     try:
         from openai import OpenAI
     except ImportError as exc:
@@ -259,87 +253,135 @@ def generate_answer(query: str, documents: list, stream: bool = False, show_reas
             "  uv add openai"
         ) from exc
 
-    api_key = os.getenv("OPENROUTER_API_KEY")
+    api_key = settings.llm_api_key or os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY environment variable not set")
+        raise RuntimeError("LLM_API_KEY (or OPENROUTER_API_KEY) environment variable not set")
+    return OpenAI(base_url=settings.llm_base_url, api_key=api_key)
 
-    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
 
+_SYSTEM_PROMPT = (
+    "You are a technical writer specialising in ETSI MEC (Multi-access Edge Computing) "
+    "specifications. When answering questions:\n"
+    "• Write a comprehensive, well-structured answer of at least 3–5 paragraphs.\n"
+    "• Back each factual claim with the specification, edition and page copied from the "
+    "[Source …] line it came from, e.g. (MEC-003 V4.1.1 p.18). Cite only pages that "
+    "appear on those lines; if no excerpt supports a claim, leave it out.\n"
+    "• If a diagram is listed in the context (📐 Diagram(s) available: …), "
+    "reference it explicitly by filename in your answer.\n"
+    "• Use the ETSI standard terminology (reference points, functional entities, etc.).\n"
+    "• Do NOT invent information not present in the provided context excerpts."
+)
+
+
+def _build_messages(query: str, documents: list) -> tuple:
+    """(chat messages, one citation label per excerpt) — shared by generate_answer and stream_answer."""
     context_text, source_labels = _build_context(documents)
-    print(f"\n[ANSWER SOURCES] {len(source_labels)} excerpts fed to the LLM "
-          f"(only --top-k of them are printed above):")
-    for i, label in enumerate(source_labels, 1):
-        print(f"  [{i}] {label}")
-
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a technical writer specialising in ETSI MEC (Multi-access Edge Computing) "
-                "specifications. When answering questions:\n"
-                "• Write a comprehensive, well-structured answer of at least 3–5 paragraphs.\n"
-                "• Back each factual claim with the specification, edition and page copied from the "
-                "[Source …] line it came from, e.g. (MEC-003 V4.1.1 p.18). Cite only pages that "
-                "appear on those lines; if no excerpt supports a claim, leave it out.\n"
-                "• If a diagram is listed in the context (📐 Diagram(s) available: …), "
-                "reference it explicitly by filename in your answer.\n"
-                "• Use the ETSI standard terminology (reference points, functional entities, etc.).\n"
-                "• Do NOT invent information not present in the provided context excerpts."
-            ),
-        },
+        {"role": "system", "content": _SYSTEM_PROMPT},
         {
             "role": "user",
             "content": f"Context excerpts from ETSI MEC specifications:\n\n{context_text}\n\nQuestion: {query}",
         },
     ]
+    return messages, source_labels
 
+
+def _extra_body():
+    # reasoning.enabled is an OpenRouter extension; other OpenAI-compatible endpoints may reject it.
+    return {"reasoning": {"enabled": True}} if "openrouter" in settings.llm_base_url else None
+
+
+def stream_answer(query: str, documents: list, meta_out: dict | None = None):
+    """Yield answer deltas from the configured endpoint — the shape st.write_stream wants.
+
+    meta_out (when given) receives "model" — which model a free router actually served, since
+    openrouter/free is a moving target — and "answer", the reassembled full text.
+    """
+    client = _llm_client()
+    messages, _ = _build_messages(query, documents)
     response = client.chat.completions.create(
-        model="openrouter/free",
+        model=settings.llm_model,
         messages=messages,
-        extra_body={"reasoning": {"enabled": True}},
-        stream=stream,
+        extra_body=_extra_body(),
+        stream=True,
     )
+    full = ""
+    for chunk in response:
+        if meta_out is not None:
+            meta_out["model"] = meta_out.get("model") or getattr(chunk, "model", "") or ""
+        if not chunk.choices:
+            continue  # usage-only / content-filter chunks carry no choices
+        delta = chunk.choices[0].delta.content
+        if delta:
+            full += delta
+            yield delta
+    if meta_out is not None:
+        meta_out["answer"] = full
+
+
+def generate_answer(query: str, documents: list, stream: bool = False, show_reasoning: bool = False) -> str:
+    """
+    Call the configured OpenAI-compatible endpoint (settings.llm_*, default openrouter/free)
+    with the retrieved ETSI MEC chunks as context.
+
+    model=settings.llm_model   — LLM_MODEL env var; default confirmed correct per OpenRouter docs
+    reasoning.enabled=True     — OpenRouter models return reasoning_details (thinking chain)
+                                 alongside the final .content answer
+    stream=True                — streams final answer token-by-token
+    show_reasoning=True        — also prints the reasoning_details thinking block
+
+    The prompt is labelled with the identity printed on each PDF and the finished answer is
+    audited against those labels, because the terminal prints only --top-k of the
+    --answer-context excerpts the model actually read.
+    """
+    messages, source_labels = _build_messages(query, documents)
+    print(f"\n[ANSWER SOURCES] {len(source_labels)} excerpts fed to the LLM "
+          f"(only --top-k of them are printed above):")
+    for i, label in enumerate(source_labels, 1):
+        print(f"  [{i}] {label}")
 
     if stream:
         # Streaming: content tokens arrive chunk-by-chunk.
         # reasoning_details are not available in streaming mode — they only
         # come back in a non-streaming response.
         print("\n[LLM ANSWER] ", end="", flush=True)
-        full = ""
-        served = ""
-        for chunk in response:
-            # Which model the free router actually picked is on the stream chunks, not a header.
-            served = served or getattr(chunk, "model", "") or ""
-            delta = chunk.choices[0].delta.content
-            if delta:
-                print(delta, end="", flush=True)
-                full += delta
+        meta_out = {}
+        for delta in stream_answer(query, documents, meta_out):
+            print(delta, end="", flush=True)
         print()
-        _report_grounding(full, documents, served)
+        full = meta_out.get("answer", "")
+        _report_grounding(full, documents, meta_out.get("model", ""))
         return full
-    else:
-        msg = response.choices[0].message
 
-        # Optionally print the model's internal reasoning chain (thinking blocks)
-        # This is the "reasoning_details" field documented on openrouter.ai/openrouter/free
-        if show_reasoning:
-            reasoning = getattr(msg, "reasoning_details", None)
-            if reasoning:
-                print("\n[REASONING]")
-                for block in reasoning:
-                    # blocks are typically {"type": "thinking", "thinking": "…"}
-                    thinking = (
-                        block.get("thinking")
-                        if isinstance(block, dict)
-                        else getattr(block, "thinking", str(block))
-                    )
-                    if thinking:
-                        print(thinking)
-                print("-" * 65)
+    client = _llm_client()
+    response = client.chat.completions.create(
+        model=settings.llm_model,
+        messages=messages,
+        extra_body=_extra_body(),
+        stream=False,
+    )
+    msg = response.choices[0].message
 
-        print("\n[LLM ANSWER]", msg.content)
-        _report_grounding(msg.content or "", documents, getattr(response, "model", "") or "")
-        return msg.content
+    # Optionally print the model's internal reasoning chain (thinking blocks)
+    # This is the "reasoning_details" field documented on openrouter.ai/openrouter/free
+    if show_reasoning:
+        reasoning = getattr(msg, "reasoning_details", None)
+        if reasoning:
+            print("\n[REASONING]")
+            for block in reasoning:
+                # blocks are typically {"type": "thinking", "thinking": "…"}
+                thinking = (
+                    block.get("thinking")
+                    if isinstance(block, dict)
+                    else getattr(block, "thinking", str(block))
+                )
+                if thinking:
+                    print(thinking)
+            print("-" * 65)
+
+    print("\n[LLM ANSWER]", msg.content)
+    _report_grounding(msg.content or "", documents, getattr(response, "model", "") or "")
+    return msg.content
 
 
 
@@ -359,6 +401,7 @@ def search_specs(
     generate: bool = False,
     stream: bool = False,
     show_reasoning: bool = False,
+    full_result: bool = False,
 ):
     """
     Execute Hybrid Search (Dense + ColBERT) with optional BM25+Vector hybrid
@@ -383,15 +426,20 @@ def search_specs(
 
     Both paths print and return the same at-most-`top_k` display excerpts (SimpleDocs with
     .content / .meta), or an empty list when nothing matched.
+
+    With `full_result=True` (the Streamlit UI's shape) nothing is generated and the return is
+    `{"display": [...], "answer_docs": [...], "info": {...}}` instead of the bare display list;
+    the prints still happen, so a caller that wants them redirects stdout.
     """
     client = get_qdrant_client()
+    want_answer = generate or full_result
     # The LLM reads more than the terminal prints: retrieval must fetch enough
     # candidates to fill the evidence budget after stitching and dedup.
-    fetch_k = max(top_k, answer_context) if generate else top_k
+    fetch_k = max(top_k, answer_context) if want_answer else top_k
     # A page's sibling part has to be in the list at all before it can merge, and ColBERT
     # rescore returns exactly `limit` results with no post-filter slack: over-fetch first,
     # stitch, then let dedup pick the display and evidence budgets (as the hybrid branch does).
-    colbert_k = fetch_k * 3 if generate else fetch_k
+    colbert_k = fetch_k * 3 if want_answer else fetch_k
     # The dense prefetch is the rerank pool and therefore the ceiling on how many excerpts
     # ColBERT can rescore: a bigger evidence budget needs a bigger pool. The budget is 15
     # excerpts while the display is 5, and _stitch_parts can only merge parts that were
@@ -425,10 +473,15 @@ def search_specs(
 
         if not stitched:
             print("No matching documents found.")
+            if full_result:
+                return {"display": [], "answer_docs": [], "info": {
+                    "path": "Hybrid RRF (dense + sparse, fused server-side in Qdrant)",
+                    "elapsed_ms": (time.time() - t0) * 1000, "stitched": 0, "shown": 0,
+                    "filter_info": filter_info.strip(), "merged_groups": 0, "answer_words": 0}}
             return []
 
         unique_docs = _dedup_docs(stitched, keep=top_k)
-        answer_docs = _dedup_docs(stitched, keep=answer_context, per_doc=per_doc) if generate else []
+        answer_docs = _dedup_docs(stitched, keep=answer_context, per_doc=per_doc) if want_answer else []
 
         if len(unique_docs) < len(stitched):
             print(f"[DEDUP] {len(stitched)} fetched → {len(unique_docs)} shown "
@@ -461,6 +514,15 @@ def search_specs(
                   f"(~{sum(len(d.content.split()) for d in answer_docs)} words), "
                   f"{sum(1 for d in stitched if (d.meta or {}).get('stitched_parts', 1) > 1)} page-part group(s) merged.")
             generate_answer(query_text, answer_docs, stream=stream, show_reasoning=show_reasoning)
+        if full_result:
+            return {"display": unique_docs, "answer_docs": answer_docs, "info": {
+                "path": "Hybrid RRF (dense + sparse, fused server-side in Qdrant)",
+                "elapsed_ms": (time.time() - t0) * 1000,
+                "stitched": len(stitched), "shown": len(unique_docs),
+                "filter_info": filter_info.strip(),
+                "merged_groups": sum(1 for d in stitched if (d.meta or {}).get("stitched_parts", 1) > 1),
+                "answer_words": sum(len(d.content.split()) for d in answer_docs),
+            }}
         return unique_docs
 
 
@@ -489,21 +551,29 @@ def search_specs(
 
     if not results.points:
         print("No matching documents found.")
+        if full_result:
+            return {"display": [], "answer_docs": [], "info": {
+                "path": f"Dense prefetch ({prefetch_limit}) + ColBERT MaxSim re-rank (top {colbert_k})",
+                "elapsed_ms": (time.time() - t0) * 1000, "fetched": 0,
+                "stitched": 0, "shown": 0, "filter_info": filter_info.strip(),
+                "merged_groups": 0, "answer_words": 0}}
         return []
 
     # Stitch first, then shape: parts 1+2 of one page come back as one excerpt, so the
     # merged text — not half a table row — is what dedup, printing and the LLM all see.
-    hit_docs  = _stitch_parts([SimpleDoc(h.payload.get("text", ""), h.payload) for h in results.points])
+    # The MaxSim score rides along in meta so the UI can display it; a stitched run keeps
+    # the first part's score, and dedup/grounding ignore the extra key.
+    hit_docs  = _stitch_parts([SimpleDoc(h.payload.get("text", ""), {**h.payload, "score": h.score})
+                               for h in results.points])
     deduped   = _dedup_docs(hit_docs, keep=top_k)
-    answer_docs = _dedup_docs(hit_docs, keep=answer_context, per_doc=per_doc) if generate else []
+    answer_docs = _dedup_docs(hit_docs, keep=answer_context, per_doc=per_doc) if want_answer else []
 
     if len(deduped) < len(hit_docs):
         print(f"[DEDUP] {len(hit_docs)} fetched → {len(deduped)} shown "
               f"(page parts merged first; the rest were duplicates or beyond --top-k).")
 
 
-    # Merged runs are SimpleDocs without a backing hit, so the loop reads doc.meta and
-    # drops the per-hit score: a stitched excerpt is several hits and has no single score.
+    # The loop reads doc.meta: a stitched excerpt is several hits and shows the first part's score.
     for i, doc in enumerate(deduped, 1):
         payload = doc.meta or {}
         doc_id        = payload.get("doc_id", "Unknown")
@@ -537,6 +607,16 @@ def search_specs(
               f"{sum(1 for d in hit_docs if (d.meta or {}).get('stitched_parts', 1) > 1)} page-part group(s) merged.")
         generate_answer(query_text, answer_docs, stream=stream, show_reasoning=show_reasoning)
 
+    if full_result:
+        return {"display": deduped, "answer_docs": answer_docs, "info": {
+            "path": f"Dense prefetch ({prefetch_limit}) + ColBERT MaxSim re-rank (top {colbert_k})",
+            "elapsed_ms": elapsed,
+            "fetched": len(results.points),
+            "stitched": len(hit_docs), "shown": len(deduped),
+            "filter_info": filter_info.strip(),
+            "merged_groups": sum(1 for d in hit_docs if (d.meta or {}).get("stitched_parts", 1) > 1),
+            "answer_words": sum(len(d.content.split()) for d in answer_docs),
+        }}
     return deduped
 
 
@@ -570,7 +650,8 @@ def main():
     )
     parser.add_argument(
         "--answer", action="store_true",
-        help="Generate an LLM answer via OpenRouter free model (requires OPENROUTER_API_KEY)",
+        help="Generate an LLM answer via the configured OpenAI-compatible endpoint "
+             "(LLM_BASE_URL/LLM_MODEL, key: LLM_API_KEY or OPENROUTER_API_KEY; default: OpenRouter free)",
     )
     parser.add_argument(
         "--stream", action="store_true",
