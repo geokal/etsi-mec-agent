@@ -22,6 +22,7 @@ dependencies = [
     "python-dotenv>=1.2.3",
     "qdrant-haystack>=10.6.0",
     "sentence-transformers>=6.1.0",
+    "streamlit>=1.66.1",
     "transformers>=5.17.0",
     "umap-learn>=0.5.12",
 ]
