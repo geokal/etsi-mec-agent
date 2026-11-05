@@ -129,8 +129,9 @@ at.run()
 assert not at.exception, at.exception
 
 stamped = [d for d in result["answer_docs"]
-           if (d.meta or {}).get("spec_id") and isinstance((d.meta or {}).get("page"), int)]
-assert stamped, "no stamped excerpt in the evidence budget — run backfill_spec_identity.py"
+           if (d.meta or {}).get("spec_id") and (d.meta or {}).get("edition")
+           and isinstance((d.meta or {}).get("page"), int)]
+assert stamped, "no edition-stamped excerpt in the evidence budget — run backfill_spec_identity.py"
 meta = stamped[0].meta
 answer_text["content"] = f"The definition sits in {meta['spec_id']} {meta['edition']} p.{meta['page']}."
 click_generate(at)
