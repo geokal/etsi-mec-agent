@@ -38,6 +38,10 @@ st.set_page_config(page_title="ETSI MEC RAG", page_icon="📡", layout="wide")
 # thread of one process — without this lock two concurrent searches capture each other's prints.
 _search_lock = threading.Lock()
 
+# Diagram files are rendered by filename under the configured dir only: a payload path is data
+# from the (possibly remote) collection, not a local file request.
+_diag_root = Path(settings.diagrams_dir).resolve()
+
 # Public-deploy gate: set APP_PASSWORD (env var or Streamlit secret) to require a password.
 # Unset = open; on a public deploy the platform's own auth (HF Space login gate) is lazier.
 _gate = os.getenv("APP_PASSWORD", "")
@@ -124,10 +128,8 @@ with tab_search:
                     st.caption(f"🔖 {head}")
                 st.markdown(doc.content or "")
                 for dp in meta.get("diagram_paths", []):
-                    p = Path(dp)
-                    if not p.exists():
-                        p = Path(settings.diagrams_dir) / p.name
-                    if p.exists():
+                    p = (_diag_root / Path(dp).name).resolve()
+                    if p.is_relative_to(_diag_root) and p.exists():
                         st.image(str(p), caption=p.name)
         with st.expander("Pipeline trace (captured stdout)"):
             st.code(st.session_state.get("trace", ""), language="text")
