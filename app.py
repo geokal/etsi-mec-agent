@@ -157,6 +157,9 @@ with tab_search:
                         "cited": len(_PAGE_RE.findall(_plain(answer))),
                         "has_identity": bool(_pages_by_spec(result["answer_docs"])),
                     }
+                elif answer is not None:  # a 200 that streamed no content at all
+                    st.warning("The endpoint returned an empty answer — re-run the query, or pin "
+                               "a different model with LLM_MODEL.")
                 st.session_state["just_streamed"] = True
 
             ans = st.session_state.get("answer")

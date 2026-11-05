@@ -51,7 +51,7 @@ def _chunks(text):
     # A leading choices=[] chunk is what real endpoints send for usage-only deltas;
     # stream_answer must skip it without dying (review-round regression).
     yield types.SimpleNamespace(model=SERVED, choices=[])
-    for word in text.split(" "):
+    for word in (text.split(" ") if text else []):  # an empty response streams no deltas
         yield types.SimpleNamespace(
             model=SERVED,
             choices=[types.SimpleNamespace(delta=types.SimpleNamespace(content=word + " "))])
@@ -143,6 +143,14 @@ assert ans["suspects"] == [], ans["suspects"]
 assert ans["model"] == SERVED
 assert at.success, "grounded citation did not render the success badge"
 assert any("[ANSWER MODEL]" in c.value for c in at.caption), "model caption missing"
+
+# --- and an empty-but-successful stream warns instead of silently doing nothing ------------
+answer_text["content"] = ""
+click_generate(at)
+at.run()
+assert not at.exception, at.exception
+assert "answer" not in at.session_state, "an empty stream must not store an answer"
+assert any("empty answer" in w.value for w in at.warning), [w.value for w in at.warning]
 
 # --- and an over-citation is called out, not printed silently ------------------------------
 answer_text["content"] = f"It also appears in {meta['spec_id']} {meta['edition']} p.999."
