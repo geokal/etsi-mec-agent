@@ -173,6 +173,18 @@ assert not at_gate.exception, at_gate.exception
 assert not at_gate.error, at_gate.error
 assert not at_gate.tabs, "the gate leaked the app UI before authentication"
 assert any(w.label == "Password" for w in at_gate.text_input), [w.label for w in at_gate.text_input]
+
+# A session authenticated against the CURRENT gate passes; one carrying the flag of a rotated
+# password must be re-challenged.
+at_gate.session_state["authed"] = "hunter2"
+at_gate.run()
+assert not at_gate.exception, at_gate.exception
+assert at_gate.tabs, "the gate-flag session did not unlock the app"
+os.environ["APP_PASSWORD"] = "hunter3"
+at_gate.run()
+assert not at_gate.exception, at_gate.exception
+assert not at_gate.tabs, "a rotated gate must invalidate the old session"
+assert any(w.label == "Password" for w in at_gate.text_input), [w.label for w in at_gate.text_input]
 del os.environ["APP_PASSWORD"]
 
 print("OK: the showcase UI wires retrieval, streaming answer and the grounding audit.")

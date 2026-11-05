@@ -50,10 +50,12 @@ if not _gate:
         _gate = st.secrets.get("APP_PASSWORD", "")
     except Exception:
         pass  # no secrets.toml anywhere — the env var is the only source
-if _gate and not st.session_state.get("authed"):
+# The flag stores the gate value it was earned against: rotating APP_PASSWORD invalidates
+# sessions authenticated with the previous value without any derived form of the secret.
+if _gate and st.session_state.get("authed") != _gate:
     pw = st.text_input("Password", type="password")
     if pw and hmac.compare_digest(pw.encode(), _gate.encode()):
-        st.session_state["authed"] = True
+        st.session_state["authed"] = _gate
         st.rerun()
     st.stop()
 
