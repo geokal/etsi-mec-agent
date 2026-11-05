@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An intelligent indexing and RAG agent for ETSI MEC (Multi-access Edge Computing) specifications using **FastEmbed** (local ONNX embeddings), **Qdrant** in Docker, and hybrid retrieval — a `dense` + `sparse` prefetch pair fused by RRF **inside Qdrant**, plus a separate `dense` → `colbert` MaxSim re-rank path — with optional LLM answers via OpenRouter.
+An intelligent indexing and RAG agent for ETSI MEC (Multi-access Edge Computing) specifications using **FastEmbed** (local ONNX embeddings), **Qdrant** in Docker, and hybrid retrieval — a `dense` + `sparse` prefetch pair fused by RRF **inside Qdrant**, plus a separate `dense` → `colbert` MaxSim re-rank path — with optional LLM answers via any OpenAI-compatible endpoint (OpenRouter free by default) and a Streamlit showcase UI (`app.py`).
 
 ![Terminal demo: a hybrid search run answering 'What is the MEP?' — 15 excerpts labelled by cover identity are handed to the LLM, then the citation check reports all seven page citations as present in the retrieved excerpts](ETSI_AGENT_DEMO.gif)
 
@@ -168,10 +168,12 @@ Query: "Explain the role of Mp1 in MEC"
 - **Retrieval Eval**: `scripts/eval_rag.py` scores recall@k for both retrieval paths against golden questions, with a corpus evidence pre-check, and reports the rank inside the wider `--answer` evidence budget as an `aggregate` column.
 - **Corpus Audit**: `scripts/audit_specs.py` hashes `data/specs/*.pdf`, reads each PDF's own title page, and reports manifest keys that do not name the document they point at, URLs it cannot verify, and spec numbers never fetched.
 - **Schema Migration**: `scripts/migrate_add_sparse.py` adds a named vector to an existing collection by copying points, because Qdrant 1.19 cannot add named vectors in place.
-- **LLM Answers**: OpenRouter's OpenAI-compatible endpoint, model ID `openrouter/free`, reasoning chain
-  optional. `--answer` echoes the excerpt labels it sent (`[ANSWER SOURCES]`), names the model that
-  actually served (`[ANSWER MODEL]`), then audits the answer's own page citations against that list
-  (`[CITATION CHECK]`) — see "How an answer is assembled".
+- **LLM Answers**: any OpenAI-compatible endpoint via `LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY` — default
+  OpenRouter's free routing (`openrouter/free`), reasoning chain optional. `--answer` echoes the excerpt
+  labels it sent (`[ANSWER SOURCES]`), names the model that actually served (`[ANSWER MODEL]`), then audits
+  the answer's own page citations against that list (`[CITATION CHECK]`) — see "How an answer is assembled".
+- **Showcase UI**: `app.py` — Streamlit front over the same retrieval and answer path the CLI uses
+  (`scripts/check_app_ui.py` runs it headless with the embedders and the LLM faked).
 - **Package Manager**: [uv](https://github.com/astral-sh/uv) on Python 3.12.
 
 ---
@@ -221,6 +223,8 @@ machine at all.
 | `check_answer_grounding.py` | excerpt labels carry no filename, the citation audit's four verdicts, and `generate_answer`'s own wiring with `openai` faked | no |
 | `check_diagram_filter.py` | the blank / sub-200px / duplicate-MD5 image filter keeps what it should | no |
 | `check_eval_golden.py` | every golden question is answerable from a spec actually present in the collection, and `docs` is treated as a set | read-only |
+| `check_migrate_sparse.py` | the sparse-migration copy refuses an existing target and resolves the alias before touching anything | no |
+| `check_app_ui.py` | the showcase UI wiring with `fastembed` and `openai` stubbed: retrieval reaches the page, the streamed answer fills the grounding panel, an over-citation is flagged, and the `APP_PASSWORD` gate renders | live Qdrant |
 
 ---
 
@@ -322,6 +326,27 @@ ONNX embedders; no API call leaves the machine unless `--answer` is used. With `
 also prints `[ANSWER CONTEXT]` (budget shaped), `[ANSWER SOURCES]` (every excerpt the model was given,
 labelled by cover identity), `[ANSWER MODEL]` (which model the free router picked) and
 `[CITATION CHECK]` (page citations the excerpts cannot support).
+
+### 6. Run the showcase UI (Streamlit)
+```bash
+uv run streamlit run app.py     # from the repo root, so data/diagrams/ paths resolve → http://localhost:8501
+```
+The UI is a front over the same `search_specs()` / `stream_answer()` the CLI runs — the terminal
+behavior above is unchanged by it.
+
+- **Search tab** — query form with both retrieval paths (RRF hybrid vs ColBERT re-rank), the display and
+  evidence budgets, `--diagrams-only` and current-edition toggles; per-hit expanders labelled by cover
+  identity (`MEC-003 V4.1.1 p.15`), extracted diagram images rendered inline when the chunk carries one,
+  and a pipeline expander showing the actual printed trace.
+- **💬 Generate answer** — streams from the configured OpenAI-compatible endpoint, then the grounding
+  panel renders what the terminal prints as `[CITATION CHECK]`: which model answered, every excerpt it
+  read, and a warning per page citation the excerpts cannot support.
+- **Corpus tab** — live collection stats (chunks, specs, editions, diagram count, a per-spec table), plus
+  `etsi_mec_graph.png` if the graph script has been run. **How it works tab** — the three-vector design.
+- Retrieval needs no API key at all — only the answer panel does. Set `APP_PASSWORD` (env var or
+  Streamlit secret) for a password gate on any public deploy; unset means open, which is right for localhost.
+- Diagrams render from `data/diagrams/`, which is **gitignored** — a fresh clone degrades to the 🖼️ badge
+  with no image, and nothing crashes.
 
 ---
 
@@ -528,11 +553,17 @@ cp .env.example .env
 |---|---|---|
 | `QDRANT_HOST` | `localhost` | Qdrant host |
 | `QDRANT_PORT` | `6333` | Qdrant HTTP port |
-| `QDRANT_INDEX` | `etsi_mec_specs` | Collection name in Qdrant |
+| `QDRANT_INDEX` | `etsi_mec_specs` | Collection name (an **alias** locally; a plain name on Qdrant Cloud) |
 | `QDRANT_PATH` | *(empty)* | Local file path for embedded Qdrant mode (instead of host/port) |
+| `QDRANT_URL` | *(empty)* | Remote Qdrant endpoint (e.g. Qdrant Cloud). Wins over `QDRANT_HOST`/`QDRANT_PORT` when set |
+| `QDRANT_API_KEY` | *(empty)* | API key for `QDRANT_URL` |
 | `DENSE_MODEL` | `BAAI/bge-small-en-v1.5` | FastEmbed dense model |
 | `COLBERT_MODEL` | `colbert-ir/colbertv2.0` | FastEmbed ColBERT model |
+| `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | OpenAI-compatible endpoint for answers |
+| `LLM_API_KEY` | *(empty)* | Key for that endpoint; falls back to `OPENROUTER_API_KEY` when empty |
+| `LLM_MODEL` | `openrouter/free` | Model ID sent to `LLM_BASE_URL` |
 | `DIAGRAMS_DIR` | `data/diagrams` | Where extracted diagram PNGs are stored |
 | `EXA_API_KEY` | *(required for monitor)* | Exa search API key |
-| `OPENROUTER_API_KEY` | *(required for --answer)* | Read directly in `search.py`, not in `config.Settings` |
+| `OPENROUTER_API_KEY` | *(required for answers)* | Used by the default OpenRouter route; read directly in `search.py`, not `config.Settings` |
+| `APP_PASSWORD` | *(empty)* | Optional Streamlit showcase login gate (`app.py`); unset = open |
 | `FASTEMBED_CACHE_PATH` | OS cache dir | Point at `models` (gitignored) to reuse downloaded ONNX weights instead of re-fetching |
