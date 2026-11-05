@@ -8,7 +8,8 @@ def get_qdrant_client() -> QdrantClient:
         return QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key or None)
     if settings.qdrant_path:
         return QdrantClient(path=settings.qdrant_path)
-    return QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+    return QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port,
+                       api_key=settings.qdrant_api_key or None)
 
 
 def ensure_collection(recreate: bool = False, collection_name: str | None = None):

@@ -11,6 +11,7 @@ import hmac
 import io
 import os
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
@@ -32,6 +33,10 @@ from etsi_mec_agent.search import (
 from etsi_mec_agent.store import get_qdrant_client
 
 st.set_page_config(page_title="ETSI MEC RAG", page_icon="📡", layout="wide")
+
+# redirect_stdout swaps the process-wide sys.stdout, and Streamlit runs each session in its own
+# thread of one process — without this lock two concurrent searches capture each other's prints.
+_search_lock = threading.Lock()
 
 # Public-deploy gate: set APP_PASSWORD (env var or Streamlit secret) to require a password.
 # Unset = open; on a public deploy the platform's own auth (HF Space login gate) is lazier.
@@ -82,7 +87,7 @@ with tab_search:
         trace = io.StringIO()
         try:
             with st.spinner("Retrieving… (first query loads the ONNX embedders: ~30–60 s)"):
-                with contextlib.redirect_stdout(trace):
+                with _search_lock, contextlib.redirect_stdout(trace):
                     result = search_specs(
                         query.strip(), top_k=top_k, diagrams_only=diagrams_only,
                         current_only=current_only, use_bm25=use_bm25,
@@ -92,7 +97,9 @@ with tab_search:
         except Exception as exc:
             st.error(f"Retrieval failed — is Qdrant reachable? {exc}")
             st.stop()
-        st.session_state.update(result=result, trace=trace.getvalue(), query=query.strip())
+        st.session_state.update(result=result, trace=trace.getvalue(), query=query.strip(),
+                                search_settings=(use_bm25, current_only, diagrams_only,
+                                                 top_k, answer_context, per_doc))
         st.session_state.pop("answer", None)
 
     result = st.session_state.get("result")
@@ -126,7 +133,11 @@ with tab_search:
             st.code(st.session_state.get("trace", ""), language="text")
 
         if want_answer and result["display"]:
-            if st.button("💬 Generate answer", type="primary"):
+            if st.session_state.get("search_settings") != (
+                    use_bm25, current_only, diagrams_only, top_k, answer_context, per_doc):
+                st.warning("Sidebar settings changed since the last Search — run Search again "
+                           "before generating an answer from them.")
+            elif st.button("💬 Generate answer", type="primary"):
                 meta_out = {}
                 st.session_state.pop("answer", None)
                 try:
@@ -153,7 +164,8 @@ with tab_search:
                     st.markdown(ans["text"])
                 st.caption(f"[ANSWER MODEL] {ans['model'] or 'unknown'} · "
                            f"[ANSWER SOURCES] {len(ans['sources'])} excerpts fed to the LLM "
-                           f"(~{info['answer_words']} words, up to {per_doc} per document)")
+                           f"(~{info['answer_words']} words, up to "
+                           f"{info.get('per_doc', per_doc)} per document)")
                 with st.expander("Evidence fed to the LLM (answer_context budget)"):
                     for j, lbl in enumerate(ans["sources"], 1):
                         st.write(f"[{j}] {lbl}")
@@ -168,8 +180,8 @@ with tab_search:
                 elif ans["cited"]:
                     st.success(f"{ans['cited']} page citation(s), all present in the retrieved excerpts.")
                 elif len(ans["text"].split()) < 40:
-                    st.warning("A short answer with no citation is a canned router response, not an "
-                               "answer — openrouter/free is non-deterministic; re-run.")
+                    st.warning("A short answer with no citation is a canned router response, not "
+                               "an answer — re-run, or pin a model with LLM_MODEL.")
                 else:
                     st.info("The answer cites no page numbers.")
 
@@ -177,6 +189,7 @@ with tab_search:
 with tab_corpus:
     @st.cache_data(ttl=300, show_spinner="Scrolling the collection…")
     def corpus_stats():
+        """(total points, one row per spec_id+edition) from a full read-only scroll."""
         client = get_qdrant_client()
         total = client.count(settings.qdrant_index).count
         rows, offset = {}, None

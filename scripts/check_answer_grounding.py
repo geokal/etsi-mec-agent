@@ -17,6 +17,12 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root / "src"))
 
+# Pinned before etsi_mec_agent.config is imported: load_dotenv never overrides a variable that
+# is already set, so these survive a developer's .env and keep the asserts describing one config.
+os.environ["LLM_BASE_URL"] = "https://openrouter.ai/api/v1"
+os.environ["LLM_MODEL"] = "openrouter/free"
+os.environ.pop("LLM_API_KEY", None)
+
 stub = types.ModuleType("fastembed")
 stub.TextEmbedding = object
 stub.LateInteractionTextEmbedding = object
@@ -65,7 +71,9 @@ assert not any(".pdf" in head.split("—")[0] for head in headers), headers
 assert "📐" in headers[1] and "data/diagrams/MEC016.pdf-0006-fig-00.png" in headers[1]
 assert docs[0].content in context and docs[2].content in context
 
-assert _pages_by_spec(docs) == {"MEC-003": {15}, "MEC-016": {6}, "MEC-DEC-032-2": {56}}
+assert _pages_by_spec(docs) == {"MEC-003": ({15}, {"V4.1.1"}),
+                                "MEC-016": ({6}, {"V3.1.1"}),
+                                "MEC-DEC-032-2": ({56}, {"V3.2.1"})}
 
 # Typographic citations. The live answer wrote "ETSI GS MEC 003 V4.1.1 (p.15)" with narrow
 # no-break spaces (U+202F) and "MEC‑059" with a non-breaking hyphen (U+2011), and the first
@@ -104,6 +112,16 @@ assert _ungrounded_citations(grounded, docs) == [], _ungrounded_citations(ground
 # Right spec, page no excerpt sits on — the fault the audit exists to catch.
 bad = _ungrounded_citations("It also relocates apps (MEC-016 V3.1.1 p.28).", docs)
 assert len(bad) == 1 and "p.28" in bad[0] and "p.6" in bad[0], bad
+
+# A range is a claim about its endpoint too: pp.6-9 asserts p.9, and no excerpt sits there.
+bad = _ungrounded_citations("Mx2 runs over pp.6-9 (MEC-016 V3.1.1).", docs)
+assert len(bad) == 1 and "p.9" in bad[0], bad
+assert _ungrounded_citations("Mx2 runs over pp.6-6 (MEC-016 V3.1.1).", docs) == []
+
+# The wrong edition of the right spec: p.15 of V2.1.1 is not p.15 of the retrieved V4.1.1.
+bad = _ungrounded_citations("The UALCMP is defined in MEC-003 V2.1.1 p.15.", docs)
+assert len(bad) == 1 and "edition" in bad[0], bad
+assert _ungrounded_citations("The UALCMP is defined in MEC-003 V4.1.1 p.15.", docs) == []
 
 # A specification the retrieval never returned.
 bad = _ungrounded_citations("See MEC-099 V1.0.1 p.4 for the definition.", docs)

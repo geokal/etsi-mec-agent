@@ -48,6 +48,9 @@ SERVED = "test/free-route-model"
 
 
 def _chunks(text):
+    # A leading choices=[] chunk is what real endpoints send for usage-only deltas;
+    # stream_answer must skip it without dying (review-round regression).
+    yield types.SimpleNamespace(model=SERVED, choices=[])
     for word in text.split(" "):
         yield types.SimpleNamespace(
             model=SERVED,
@@ -66,11 +69,20 @@ fake_openai.OpenAI = lambda base_url, api_key: types.SimpleNamespace(
 sys.modules["openai"] = fake_openai
 import os
 os.environ["OPENROUTER_API_KEY"] = "not-a-real-key"
+# A stray APP_PASSWORD in the shell would stop every run at the gate; the gate gets its own
+# targeted run at the end of this file.
+os.environ.pop("APP_PASSWORD", None)
+# Pinned before app.py imports the config: a developer's .env must not change what this check
+# exercises (load_dotenv never overrides a variable that is already set).
+os.environ["LLM_BASE_URL"] = "https://openrouter.ai/api/v1"
+os.environ["LLM_MODEL"] = "openrouter/free"
+os.environ.pop("LLM_API_KEY", None)
 
 from streamlit.testing.v1 import AppTest
 
 
 def click_generate(at):
+    """Click the 💬 Generate answer button (the form's submit button is also in at.button)."""
     # at.button also lists the form's submit button, so pick by label, not index.
     gen = [b for b in at.button if b.label.startswith("💬")]
     assert gen, "the Generate answer button did not render"
@@ -100,6 +112,16 @@ assert "[QUERY]" in trace and "[DEDUP]" in trace or "[HYBRID]" in trace, trace[:
 # every hit expander is labelled by cover identity, never by filename
 for exp in at.expander:
     assert ".pdf" not in exp.label, exp.label
+
+# --- the ColBERT re-rank path reaches the UI through the same full_result shape ---------------
+at.sidebar.radio[0].set_value("Dense + ColBERT re-rank")
+at.form_submit_button[0].click()
+at.run()
+assert not at.exception, at.exception
+result = at.session_state["result"]
+assert result["info"]["path"].startswith("Dense prefetch"), result["info"]["path"]
+assert result["display"] and result["answer_docs"], "colbert path returned no UI payload"
+assert result["info"]["fetched"] >= len(result["display"])
 
 # --- answer panel: a grounded citation passes the audit through the UI --------------------
 at.sidebar.toggle[0].set_value(True)
@@ -140,6 +162,7 @@ at_gate = AppTest.from_file(str(root / "app.py"), default_timeout=60)
 at_gate.run()
 assert not at_gate.exception, at_gate.exception
 assert not at_gate.error, at_gate.error
+assert not at_gate.tabs, "the gate leaked the app UI before authentication"
 assert any(w.label == "Password" for w in at_gate.text_input), [w.label for w in at_gate.text_input]
 del os.environ["APP_PASSWORD"]
 
