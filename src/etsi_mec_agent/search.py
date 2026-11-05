@@ -216,7 +216,14 @@ def _ungrounded_citations(answer: str, documents: list) -> list:
         # that no single excerpt has to cover.
         span = _re.match(r"\s*[-–—]\s*(\d{1,4})", answer[hit.end():])
         claimed = [page] + ([int(span.group(1))] if span else [])
-        near = min(codes, key=lambda c: min(abs(c[1] - hit.start()), abs(c[2] - hit.start())),
+        # Nearest gap wins; when two codes tie at zero distance the one on the page's own
+        # side claims it — "p.15, MEC-016" must not read the gap left of MEC-016 as p.15's.
+        # Prose form ("page 6 of MEC-016") belongs to the code that follows it.
+        page_compact = hit.group(1) is not None
+        near = min(codes,
+                   key=lambda c: (max(c[1] - hit.end(), 0) if page_compact
+                                  else max(hit.start() - c[2], 0),
+                                  min(abs(c[1] - hit.start()), abs(c[2] - hit.start()))),
                    default=None)
         if near is None or min(abs(near[1] - hit.start()), abs(near[2] - hit.start())) > _CITE_WINDOW:
             complaints.append(f"p.{page} cited with no specification named")
@@ -230,11 +237,21 @@ def _ungrounded_citations(answer: str, documents: list) -> list:
             if p not in have_pages:
                 have = ", ".join(f"p.{x}" for x in sorted(have_pages))
                 complaints.append(f"{near[0]} p.{p} — not in that spec's excerpts (they are {have})")
-        cited = (_re.search(_EDITION_RE, answer[hit.end():hit.end() + 24])
-                 or _re.search(_EDITION_RE, answer[max(near[1], hit.start() - 60):hit.start()]))
+        # Prefer the edition written between the spec code and the page; the forward window is
+        # for "p.15 of MEC-016 V3.1.1" and must stop at the next citation's spec code, or the
+        # next citation's edition would be attributed to this page.
+        tail = answer[hit.end():hit.end() + 24]
+        later = [c[1] - hit.end() for c in codes if c is not near and c[1] >= hit.end()]
+        if later:
+            tail = tail[:min(later)]
+        cited = (_re.search(_EDITION_RE, answer[max(near[1], hit.start() - 60):hit.start()])
+                 or _re.search(_EDITION_RE, tail))
         if cited and have_editions:
             num = _re.search(r"\d+(?:\.\d+)+", cited.group())
-            if num and not any(num.group() in e for e in have_editions):
+            # A version match, not a substring: "1.1" is not the retrieved "4.1.1".
+            if num and not any(e.lstrip("Vv") == num.group()
+                               or e.lstrip("Vv").startswith(num.group() + ".")
+                               for e in have_editions):
                 complaints.append(
                     f"{near[0]} p.{page} — cites edition {cited.group()}, retrieved excerpts of "
                     f"this spec are {', '.join(sorted(have_editions))}")
