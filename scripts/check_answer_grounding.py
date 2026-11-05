@@ -123,6 +123,17 @@ bad = _ungrounded_citations("The UALCMP is defined in MEC-003 V2.1.1 p.15.", doc
 assert len(bad) == 1 and "edition" in bad[0], bad
 assert _ungrounded_citations("The UALCMP is defined in MEC-003 V4.1.1 p.15.", docs) == []
 
+# An edition must match as a version, not as a substring: "V1.1" hides inside "V4.1.1".
+bad = _ungrounded_citations("The UALCMP is defined in MEC-003 V1.1 p.15.", docs)
+assert len(bad) == 1 and "edition" in bad[0], bad
+
+# Two citations in one parenthesis: p.15's forward window must stop at MEC-016 and must not
+# attribute V3.1.1 to the first citation.
+assert _ungrounded_citations("Two claims (MEC-003 V4.1.1 p.15, MEC-016 V3.1.1 p.6).", docs) == []
+# The same tie resolves the other way for the prose form, which belongs to the following code.
+bad = _ungrounded_citations("Defined on page 99 of MEC-016 V3.1.1.", docs)
+assert len(bad) == 1 and "p.99" in bad[0], bad
+
 # A specification the retrieval never returned.
 bad = _ungrounded_citations("See MEC-099 V1.0.1 p.4 for the definition.", docs)
 assert len(bad) == 1 and "no excerpt" in bad[0], bad
