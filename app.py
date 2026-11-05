@@ -259,8 +259,10 @@ claiming one.
 59 of the 106 files in `data/specs/` hold another specification's content, and 52 are
 byte-identical copies of another file. `scripts/backfill_spec_identity.py` therefore stamps
 `spec_id` / `edition` / `pub_date` / `content_md5` / `is_current` onto every stored point, and
-citations are labelled by that identity (`MEC-003 V4.1.1 p.15`) — the filename never enters a
-prompt. Superseded editions are filtered server-side unless you untick *Current editions only*.
+citations are labelled by that identity (`MEC-003 V4.1.1 p.15`) — a filename enters a prompt
+only as the visible fallback label of an excerpt the backfill has not stamped yet, never as a
+stand-in for the identity its own cover declares. Superseded editions are filtered server-side
+unless you untick *Current editions only*.
 
 ### Citations are audited, not just requested
 
