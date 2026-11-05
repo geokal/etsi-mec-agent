@@ -16,6 +16,7 @@ from etsi_mec_agent.store import get_qdrant_client
 # ~30–60 s cold; the CLI calls this once per process either way.
 @functools.lru_cache(maxsize=1)
 def get_embedders():
+    """The two local ONNX embedders, loaded once per process."""
     dense_model = TextEmbedding(settings.dense_model)
     colbert_model = LateInteractionTextEmbedding(settings.colbert_model)
     return dense_model, colbert_model
@@ -124,6 +125,9 @@ _SPEC_RE = _re.compile(r"\bMEC(?:[- ]?DEC)?[- ]?\d{3}(?:[- ]?\d+)?", _re.IGNOREC
 # A part number is canonicalised, not just matched: models write "MEC 010-02" where the cover says
 # "MEC 010-2", and the two must resolve to the same specification.
 _PART_RE = _re.compile(r"^(MEC(?:-DEC)?-\d{3})-0*(\d+)$")
+# An explicit edition in a citation ("V4.1.1") is checked against the stamped editions,
+# because p.15 of one edition is not p.15 of another.
+_EDITION_RE = r"\b[Vv]\d+(?:\.\d+){1,3}\b"
 
 
 def _plain(text: str) -> str:
@@ -168,12 +172,16 @@ def _build_context(documents: list) -> tuple:
 
 
 def _pages_by_spec(documents: list) -> dict:
-    """{canonical spec: {pages}} over the excerpts that carry a stamped identity."""
+    """{canonical spec: (pages, editions)} over the excerpts that carry a stamped identity."""
     pages = {}
     for doc in documents:
         meta = getattr(doc, "meta", None) or {}
-        if meta.get("spec_id") and isinstance(meta.get("page"), int):
-            pages.setdefault(_norm_spec(meta["spec_id"]), set()).add(meta["page"])
+        spec = meta.get("spec_id")
+        if spec and isinstance(meta.get("page"), int):
+            entry = pages.setdefault(_norm_spec(spec), (set(), set()))
+            entry[0].add(meta["page"])
+            if meta.get("edition"):
+                entry[1].add(meta["edition"])
     return pages
 
 
@@ -204,15 +212,32 @@ def _ungrounded_citations(answer: str, documents: list) -> list:
     complaints = []
     for hit in _PAGE_RE.finditer(answer):
         page = int(hit.group(1) or hit.group(2))
+        # The endpoint of a range is a claim too; the middle pages of "pp.15-17" are prose slack
+        # that no single excerpt has to cover.
+        span = _re.match(r"\s*[-–—]\s*(\d{1,4})", answer[hit.end():])
+        claimed = [page] + ([int(span.group(1))] if span else [])
         near = min(codes, key=lambda c: min(abs(c[1] - hit.start()), abs(c[2] - hit.start())),
                    default=None)
         if near is None or min(abs(near[1] - hit.start()), abs(near[2] - hit.start())) > _CITE_WINDOW:
             complaints.append(f"p.{page} cited with no specification named")
-        elif near[0] not in pages:
-            complaints.append(f"{near[0]} p.{page} — no excerpt from this specification was retrieved")
-        elif page not in pages[near[0]]:
-            have = ", ".join(f"p.{p}" for p in sorted(pages[near[0]]))
-            complaints.append(f"{near[0]} p.{page} — not in that spec's excerpts (they are {have})")
+            continue
+        if near[0] not in pages:
+            for p in claimed:
+                complaints.append(f"{near[0]} p.{p} — no excerpt from this specification was retrieved")
+            continue
+        have_pages, have_editions = pages[near[0]]
+        for p in claimed:
+            if p not in have_pages:
+                have = ", ".join(f"p.{x}" for x in sorted(have_pages))
+                complaints.append(f"{near[0]} p.{p} — not in that spec's excerpts (they are {have})")
+        cited = (_re.search(_EDITION_RE, answer[hit.end():hit.end() + 24])
+                 or _re.search(_EDITION_RE, answer[max(near[1], hit.start() - 60):hit.start()]))
+        if cited and have_editions:
+            num = _re.search(r"\d+(?:\.\d+)+", cited.group())
+            if num and not any(num.group() in e for e in have_editions):
+                complaints.append(
+                    f"{near[0]} p.{page} — cites edition {cited.group()}, retrieved excerpts of "
+                    f"this spec are {', '.join(sorted(have_editions))}")
     return list(dict.fromkeys(complaints))
 
 
@@ -238,7 +263,7 @@ def _report_grounding(answer: str, documents: list, model: str = "") -> None:
         # The free router sometimes answers with a classifier line instead of a generation; printed
         # as bare text it looks like an answer. Measured 2026-10-08: "User Safety: safe".
         print(f"[CITATION CHECK] {words} word(s) and no citation — that is a canned response from "
-              f"the router, not an answer. Re-run: openrouter/free is non-deterministic.")
+              f"the router, not an answer. Re-run, or pin a model with LLM_MODEL.")
     else:
         print("[CITATION CHECK] the answer cites no page numbers.")
 
@@ -253,9 +278,16 @@ def _llm_client():
             "  uv add openai"
         ) from exc
 
-    api_key = settings.llm_api_key or os.getenv("OPENROUTER_API_KEY")
+    # OPENROUTER_API_KEY is a fallback for the OpenRouter route only — a key must never be
+    # carried to an unrelated base_url.
+    api_key = settings.llm_api_key
+    if not api_key and "openrouter" in settings.llm_base_url:
+        api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        raise RuntimeError("LLM_API_KEY (or OPENROUTER_API_KEY) environment variable not set")
+        raise RuntimeError(
+            f"No API key for {settings.llm_base_url} — set LLM_API_KEY "
+            "(OPENROUTER_API_KEY also works for the OpenRouter route)."
+        )
     return OpenAI(base_url=settings.llm_base_url, api_key=api_key)
 
 
@@ -287,6 +319,7 @@ def _build_messages(query: str, documents: list) -> tuple:
 
 
 def _extra_body():
+    """Extra request body sent with every completion for the configured endpoint."""
     # reasoning.enabled is an OpenRouter extension; other OpenAI-compatible endpoints may reject it.
     return {"reasoning": {"enabled": True}} if "openrouter" in settings.llm_base_url else None
 
@@ -306,17 +339,22 @@ def stream_answer(query: str, documents: list, meta_out: dict | None = None):
         stream=True,
     )
     full = ""
-    for chunk in response:
-        if meta_out is not None:
-            meta_out["model"] = meta_out.get("model") or getattr(chunk, "model", "") or ""
-        if not chunk.choices:
-            continue  # usage-only / content-filter chunks carry no choices
-        delta = chunk.choices[0].delta.content
-        if delta:
-            full += delta
-            yield delta
     if meta_out is not None:
-        meta_out["answer"] = full
+        meta_out["model"] = ""  # per-call provenance; never inherited from an earlier stream
+    try:
+        for chunk in response:
+            if meta_out is not None:
+                meta_out["model"] = meta_out.get("model") or getattr(chunk, "model", "") or ""
+            if not chunk.choices:
+                continue  # usage-only / content-filter chunks carry no choices
+            delta = chunk.choices[0].delta.content
+            if delta:
+                full += delta
+                yield delta
+    finally:
+        response.close()  # an abandoned stream (browser stop) must not hold the HTTP connection
+        if meta_out is not None:
+            meta_out["answer"] = full
 
 
 def generate_answer(query: str, documents: list, stream: bool = False, show_reasoning: bool = False) -> str:
@@ -431,6 +469,8 @@ def search_specs(
     `{"display": [...], "answer_docs": [...], "info": {...}}` instead of the bare display list;
     the prints still happen, so a caller that wants them redirects stdout.
     """
+    if generate and full_result:
+        raise ValueError("full_result is the UI shape and never generates — pass generate=False")
     client = get_qdrant_client()
     want_answer = generate or full_result
     # The LLM reads more than the terminal prints: retrieval must fetch enough
@@ -462,21 +502,22 @@ def search_specs(
     if use_bm25:
         print(f"\n[QUERY] '{query_text}' [HYBRID: Dense + sparse prefetch → server-side RRF]"
               f"{filter_info}")
-        stitched = _stitch_parts(_run_hybrid_retrieval(
+        hybrid_hits = _run_hybrid_retrieval(
             client=client,
             query_text=query_text,
             query_dense=query_dense,
             top_k=fetch_k * 6,        # fetch 6× more so dedup still fills the evidence budget
             prefetch_limit=max(prefetch_limit * 4, 100),
             query_filter=query_filter,
-        ))
+        )
+        stitched = _stitch_parts(hybrid_hits)
 
         if not stitched:
             print("No matching documents found.")
             if full_result:
                 return {"display": [], "answer_docs": [], "info": {
                     "path": "Hybrid RRF (dense + sparse, fused server-side in Qdrant)",
-                    "elapsed_ms": (time.time() - t0) * 1000, "stitched": 0, "shown": 0,
+                    "elapsed_ms": (time.time() - t0) * 1000, "fetched": 0, "stitched": 0, "shown": 0,
                     "filter_info": filter_info.strip(), "merged_groups": 0, "answer_words": 0}}
             return []
 
@@ -518,7 +559,9 @@ def search_specs(
             return {"display": unique_docs, "answer_docs": answer_docs, "info": {
                 "path": "Hybrid RRF (dense + sparse, fused server-side in Qdrant)",
                 "elapsed_ms": (time.time() - t0) * 1000,
+                "fetched": len(hybrid_hits),
                 "stitched": len(stitched), "shown": len(unique_docs),
+                "answer_context": answer_context, "per_doc": per_doc,
                 "filter_info": filter_info.strip(),
                 "merged_groups": sum(1 for d in stitched if (d.meta or {}).get("stitched_parts", 1) > 1),
                 "answer_words": sum(len(d.content.split()) for d in answer_docs),
@@ -613,6 +656,7 @@ def search_specs(
             "elapsed_ms": elapsed,
             "fetched": len(results.points),
             "stitched": len(hit_docs), "shown": len(deduped),
+            "answer_context": answer_context, "per_doc": per_doc,
             "filter_info": filter_info.strip(),
             "merged_groups": sum(1 for d in hit_docs if (d.meta or {}).get("stitched_parts", 1) > 1),
             "answer_words": sum(len(d.content.split()) for d in answer_docs),
@@ -626,6 +670,7 @@ def search_specs(
 # ---------------------------------------------------------------------------
 
 def main():
+    """Parse the CLI flags below and hand them to search_specs."""
     parser = argparse.ArgumentParser(
         description="Hybrid (Dense + ColBERT) search for ETSI MEC specifications."
     )
