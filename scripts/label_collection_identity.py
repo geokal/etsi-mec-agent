@@ -2,6 +2,7 @@
 
     uv run python scripts/label_collection_identity.py            # report only
     uv run python scripts/label_collection_identity.py --apply    # write the metadata
+    uv run python scripts/label_collection_identity.py --apply --force   # overwrite a wrong claim
 
 The guard in `store.verify_collection_identity` refuses to query a collection that does not say
 which provider made its vectors, so this has to run before the guard goes live — otherwise every
@@ -32,6 +33,8 @@ def main():
                         help=f"collection or alias to label (default: {settings.qdrant_index})")
     parser.add_argument("--apply", action="store_true",
                         help="write the metadata; without it this only reports")
+    parser.add_argument("--force", action="store_true",
+                        help="overwrite an identity the collection already carries")
     args = parser.parse_args()
 
     client = get_qdrant_client()
@@ -51,8 +54,15 @@ def main():
 
     if not args.apply:
         print("[dry-run] re-run with --apply to write the metadata above onto "
-              f"'{name}' (points untouched).")
+              f"'{name}' (points untouched)." if not stored else
+              f"[dry-run] '{name}' already claims a different identity: --apply needs --force.")
         return
+
+    if stored and not args.force:
+        raise SystemExit(
+            "ABORT: this collection already claims a different identity. Overwriting it would make "
+            "the guard accept vectors nobody vouched for — pass --force only if that stored claim "
+            "is itself wrong (and the vectors really are this provider's).")
 
     client.update_collection(collection_name=name, metadata=expected)
     after = client.get_collection(name).config.metadata or {}

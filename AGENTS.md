@@ -70,7 +70,8 @@ scripts/
   check_answer_grounding.py # asserts generate_answer labels excerpts by cover identity and audits its own citations; no models, openai is faked
   check_embedder_swap.py    # asserts the provider seam and the identity guard; no models, fastembed is blocked
   label_collection_identity.py # stamp the embedding identity onto a collection that predates the guard
-  #                            # (metadata only, no re-embed); dry run by default, --apply writes
+  #                            # (metadata only, no re-embed); dry run by default, --apply writes,
+  #                            # and --force is needed to overwrite a different identity claim
   eval_rag.py               # golden-question recall@k, both paths + the --answer budget
   migrate_add_sparse.py     # copy points into a new collection that has 'sparse' (no re-embed);
   #                         # resolves the alias and refuses an existing --target rather than clobbering it

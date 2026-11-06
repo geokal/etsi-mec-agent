@@ -61,6 +61,7 @@ class _FakeClient:
         self.exists = exists
         self.read_names = []
         self.created = []
+        self.updates = []
 
     def get_collection(self, name):
         self.read_names.append(name)
@@ -77,6 +78,10 @@ class _FakeClient:
 
     def create_payload_index(self, **kwargs):
         pass
+
+    def update_collection(self, collection_name, metadata=None, **kwargs):
+        self.updates.append((collection_name, metadata))
+        self.metadata = metadata
 
 
 # --- the mode switch -------------------------------------------------------------------------
@@ -170,8 +175,47 @@ store.get_qdrant_client = lambda: existing
 ensure_collection(collection_name="probe")
 assert existing.created == [], "an existing collection must not be recreated or restamped"
 
+# --- the label script will not overwrite a different claim -----------------------------------
+
+sys.path.insert(0, str(root / "scripts"))
+import label_collection_identity as lci
+
+lci.resolve_collection = lambda client, name: name
+lci.get_provider = lambda: types.SimpleNamespace(identity=lambda: dict(identity))
+
+
+def _label(metadata, *argv):
+    """Run the label script's main() against a fake collection; returns (client, SystemExit|None)."""
+    client = _FakeClient(metadata=metadata)
+    lci.get_qdrant_client = lambda: client
+    held = sys.argv
+    sys.argv = ["label_collection_identity.py", *argv]
+    try:
+        lci.main()
+        return client, None
+    except SystemExit as exc:
+        return client, exc
+    finally:
+        sys.argv = held
+
+
+client, err = _label({}, "--apply")                     # unlabeled: stamping is the whole point
+assert err is None and client.updates == [("etsi_mec_specs", identity)], (err, client.updates)
+
+client, err = _label(swapped, "--apply")                # another provider's claim: refuse
+assert err is not None and "--force" in str(err), err
+assert client.updates == [], client.updates
+
+client, err = _label(swapped, "--apply", "--force")     # ...unless the operator vouches for it
+assert err is None and client.updates == [("etsi_mec_specs", identity)], (err, client.updates)
+
+client, err = _label(swapped)                           # dry run reports and writes nothing
+assert err is None and client.updates == [], (err, client.updates)
+
 print("[check] provider seam: EMBEDDING_MODE=local -> OnnxProvider, cached per process,")
 print("[check]   unsupported mode raises ValueError, identity signature complete,")
 print("[check]   query/batch shapes, sparse stays client-side crc32,")
 print("[check]   guard silent on match + names the swapped key and the label script otherwise,")
-print("[check]   ensure_collection stamps metadata at birth and never restamps — OK")
+print("[check]   ensure_collection stamps metadata at birth and never restamps,")
+print("[check]   label script stamps an unlabeled collection and refuses to overwrite")
+print("[check]   a different claim without --force — OK")
