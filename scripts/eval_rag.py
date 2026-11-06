@@ -29,7 +29,7 @@ from etsi_mec_agent.config import settings
 from etsi_mec_agent.dedup import SimpleDoc, _dedup_docs, _stitch_parts
 from etsi_mec_agent.embeddings import get_provider
 from etsi_mec_agent.search import _run_hybrid_retrieval, build_filter
-from etsi_mec_agent.store import get_qdrant_client
+from etsi_mec_agent.store import get_qdrant_client, verify_collection_identity
 
 
 def doc_key(meta):
@@ -148,6 +148,7 @@ def main():
     k, window, per_doc = args.top_k, args.answer_context, args.per_doc
 
     client = get_qdrant_client()
+    verify_collection_identity(client)   # a model swap would score noise, not answer questions
     corpus = load_corpus(client)
     provider = get_provider()
 

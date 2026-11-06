@@ -7,7 +7,7 @@ from qdrant_client import models
 from etsi_mec_agent.config import settings
 from etsi_mec_agent.dedup import SimpleDoc, _dedup_docs, _stitch_parts
 from etsi_mec_agent.embeddings import get_provider
-from etsi_mec_agent.store import get_qdrant_client
+from etsi_mec_agent.store import get_qdrant_client, verify_collection_identity
 
 
 def build_filter(current_only: bool = True, diagrams_only: bool = False):
@@ -462,6 +462,9 @@ def search_specs(
     if generate and full_result:
         raise ValueError("full_result is the UI shape and never generates — pass generate=False")
     client = get_qdrant_client()
+    # Before the embedders load (cold ONNX costs 30-60s): if the stored vectors came from another
+    # provider, every score below is noise, so abort naming the mismatch instead.
+    verify_collection_identity(client)
     want_answer = generate or full_result
     # The LLM reads more than the terminal prints: retrieval must fetch enough
     # candidates to fill the evidence budget after stitching and dedup.

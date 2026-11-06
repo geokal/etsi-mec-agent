@@ -16,7 +16,7 @@ from etsi_mec_agent.chunking import chunk_page
 from etsi_mec_agent.config import settings
 from etsi_mec_agent.embeddings import _token_sparse, get_provider
 from etsi_mec_agent.identity import stamp as identity_stamp
-from etsi_mec_agent.store import ensure_collection, get_qdrant_client
+from etsi_mec_agent.store import ensure_collection, get_qdrant_client, verify_collection_identity
 
 # Ensure stdout flushes immediately in real-time
 if hasattr(sys.stdout, "reconfigure"):
@@ -343,6 +343,11 @@ def ingest_pdfs(
     if not dry_run:
         ensure_collection(recreate=recreate_index)
     client = get_qdrant_client()
+    if not dry_run:
+        # Without --recreate-index the new points land beside the stored ones: if those came from
+        # another provider, one collection would hold two vector spaces and retrieval would score
+        # them together.
+        verify_collection_identity(client)
     # Dry-run: skip model loading entirely — nothing gets embedded or written.
     provider = None if dry_run else get_provider()
 
