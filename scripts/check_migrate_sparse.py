@@ -2,26 +2,20 @@
 
     uv run python scripts/check_migrate_sparse.py
 
-`fastembed` is stubbed, so importing the migration (which pulls in `search`) loads no ONNX model and
-no Qdrant connection is made. The migration copies stored points without re-embedding, so the sparse
-vector it rebuilds from the payload has to equal the one ingest produced: ingest tokenises
-`spec_id edition clause heading\\nbody` (ingest.py:243-244), while the payload stores only the body
-under "text". Reading the body alone — what this did before the fix — drops the cover-derived spec
-number from the sparse vector.
+No ONNX model loads and no Qdrant connection is made: the sparse tokenizer imports without
+fastembed now that embeddings.py loads it lazily. The migration copies stored points without
+re-embedding, so the sparse vector it rebuilds from the payload has to equal the one ingest
+produced: ingest tokenises `spec_id edition clause heading\\nbody` (ingest.py:243-244), while
+the payload stores only the body under "text". Reading the body alone — what this did before
+the fix — drops the cover-derived spec number from the sparse vector.
 """
 import sys
-import types
 import zlib
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root / "src"))
 sys.path.insert(0, str(root / "scripts"))
-
-stub = types.ModuleType("fastembed")
-stub.TextEmbedding = object
-stub.LateInteractionTextEmbedding = object
-sys.modules.setdefault("fastembed", stub)
 
 from etsi_mec_agent.embeddings import _token_sparse
 from migrate_add_sparse import _embed_text

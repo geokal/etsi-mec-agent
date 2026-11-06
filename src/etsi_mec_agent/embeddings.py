@@ -9,7 +9,6 @@ import functools
 import re as _re
 import zlib
 
-from fastembed import LateInteractionTextEmbedding, TextEmbedding
 from qdrant_client import models
 
 from etsi_mec_agent.config import settings
@@ -20,6 +19,12 @@ from etsi_mec_agent.config import settings
 @functools.lru_cache(maxsize=1)
 def get_embedders():
     """Load CPU-optimized ONNX models for Dense and ColBERT embeddings, once per process."""
+    # Lazy: the sparse-only scripts (migrate_add_sparse, check_migrate_sparse) import this
+    # module without ever needing ONNX, and fastembed stays an optional package.
+    try:
+        from fastembed import LateInteractionTextEmbedding, TextEmbedding
+    except ImportError as exc:
+        raise ImportError("fastembed is required to embed locally (EMBEDDING_MODE=local)") from exc
     print(f"Loading Dense embedder ({settings.dense_model})...", flush=True)
     dense_model = TextEmbedding(settings.dense_model)
 
