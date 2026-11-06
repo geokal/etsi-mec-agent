@@ -117,6 +117,12 @@ while both collections stay alive. `delete_collection` drops its aliases silentl
 resolves to nothing, so re-point before deleting; and an alias cannot take the name of a collection
 that still exists (409).
 
+If a gate or search that touches Qdrant dies with `httpx.InvalidURL: Invalid port: ':1]'`, the shell
+exports a `NO_PROXY` containing a bracketed IPv6 entry (`[::1]`) that httpx cannot parse when it
+builds its proxy mounts — the repo code is fine. Run it as
+`env -u NO_PROXY uv run python scripts/<gate>.py` (observed 2026-11-07 in the agent shell; a normal
+terminal without that variable is unaffected).
+
 ---
 
 ## Common commands
