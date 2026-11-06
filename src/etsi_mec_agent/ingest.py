@@ -301,10 +301,11 @@ def ingest_single_pdf(
 
         # Embedded text and stored text differ on purpose (B3): the vector side carries the spec
         # and clause context a bare "7.2.1" needs, the payload side stays the page markdown.
+        # The provider returns point-ready values: lists locally, models.Document in cloud mode.
         batch_points = [
             PointStruct(
                 id=str(uuid.uuid4()),
-                vector={"dense": d_vec.tolist(), "colbert": c_vec.tolist(),
+                vector={"dense": d_vec, "colbert": c_vec,
                         "sparse": _token_sparse(embed_text)},
                 payload={"text": body, **meta},
             )

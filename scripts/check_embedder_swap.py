@@ -4,7 +4,8 @@
 
 No models, no Qdrant, no .env bending: `EMBEDDING_MODE` is pinned before `config` is imported and
 `fastembed` is blocked in `sys.modules`, so a provider that touched ONNX here would fail instead of
-passing. What it pins: the mode switch picks the ONNX provider and names its own limits, the
+passing. What it pins: the mode switch picks the ONNX provider and names its own limits, cloud mode
+sends `models.Document` (and needs `QDRANT_URL` plus the client's `cloud_inference` flag), the
 identity signature is what the guard compares, sparse stays client-side crc32 in every mode, and
 `ensure_collection` stamps that signature at birth.
 """
@@ -16,6 +17,8 @@ import zlib
 from pathlib import Path
 
 os.environ["EMBEDDING_MODE"] = "local"   # pinned first: load_dotenv() does not override the environ
+os.environ["QDRANT_URL"] = ""            # a developer's cloud cluster must not make cloud mode
+os.environ["QDRANT_API_KEY"] = ""        # constructible here — these tests set it explicitly
 
 root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root / "src"))
@@ -26,7 +29,7 @@ from qdrant_client import models
 
 from etsi_mec_agent import embeddings, store
 from etsi_mec_agent.config import settings
-from etsi_mec_agent.embeddings import OnnxProvider, get_provider
+from etsi_mec_agent.embeddings import CloudInferenceProvider, OnnxProvider, get_provider
 from etsi_mec_agent.store import _identity_problem, ensure_collection, verify_collection_identity
 
 
@@ -34,7 +37,8 @@ class _Vec(list):
     """Stands in for a numpy vector: the seam calls .tolist() on the model's output."""
 
     def tolist(self):
-        return list(self)
+        # Recursive like numpy's: a ColBERT passage is a 2-D array, and ingest stores plain lists.
+        return [v.tolist() if isinstance(v, _Vec) else v for v in self]
 
 
 class _FakeDense:
@@ -100,18 +104,26 @@ assert identity == {
     "sparse": "crc32-term-frequency",
 }, identity
 
-# An unshipped runtime has to fail loudly, not fall back to ONNX against a cloud-made collection.
 _real_settings = embeddings.settings
-embeddings.settings = dataclasses.replace(_real_settings, embedding_mode="cloud")
-get_provider.cache_clear()
+
+
+def _settings(**over):
+    """Point both modules at a replaced Settings and drop the cached provider."""
+    replaced = dataclasses.replace(_real_settings, **over)
+    embeddings.settings = store.settings = replaced
+    get_provider.cache_clear()
+    return replaced
+
+
+# An unshipped runtime has to fail loudly, not fall back to ONNX against a collection another
+# provider made.
+_settings(embedding_mode="openai")
 try:
     get_provider()
-    raise AssertionError("EMBEDDING_MODE=cloud must raise, not silently embed locally")
+    raise AssertionError("EMBEDDING_MODE=openai must raise, not silently embed locally")
 except ValueError as exc:
-    assert "cloud" in str(exc), exc
-finally:
-    embeddings.settings = _real_settings
-    get_provider.cache_clear()
+    assert "openai" in str(exc), exc
+_settings()
 assert isinstance(get_provider(), OnnxProvider)
 
 # --- query vectors, with the models faked out ------------------------------------------------
@@ -133,6 +145,10 @@ batch = provider.embed_dense_batch(["a", "b"])
 assert len(batch) == 2 and len(batch[0]) == settings.dense_dim, batch
 cbatch = provider.embed_colbert_batch(["a", "b"])
 assert len(cbatch) == 2 and all(len(t) == settings.colbert_dim for t in cbatch[0]), cbatch
+# Point-ready, not model-ready: ingest.py puts these straight into PointStruct.vector, so the
+# provider converts (_Vec subclasses list; .tolist() returns a plain one) and a cloud Document
+# can take the same slot.
+assert type(batch[0]) is list and type(cbatch[0][0]) is list, (type(batch[0]), type(cbatch[0][0]))
 
 # --- the identity guard ---------------------------------------------------------------------
 
@@ -157,6 +173,56 @@ for bad, needle in ((None, "label_collection_identity.py"),
         raise AssertionError(f"guard accepted metadata={bad!r}")
     except RuntimeError as exc:
         assert needle in str(exc), exc
+
+# --- cloud mode: text out, vectors made server-side ------------------------------------------
+
+_settings(embedding_mode="cloud")
+try:
+    get_provider()
+    raise AssertionError("EMBEDDING_MODE=cloud without QDRANT_URL must raise")
+except ValueError as exc:
+    assert "QDRANT_URL" in str(exc), exc
+
+cloud_cfg = _settings(embedding_mode="cloud", qdrant_url="https://cluster.example:6333",
+                      qdrant_api_key="not-a-real-key",
+                      colbert_model="answerdotai/answerai-colbert-small-v1", colbert_dim=96)
+cloud = get_provider()
+assert isinstance(cloud, CloudInferenceProvider), cloud
+
+cid = cloud.identity()
+assert cid["mode"] == "cloud", cid
+assert cid["colbert_model"] == cloud_cfg.colbert_model and cid["colbert_dim"] == 96, cid
+assert cid["dense_model"] == cloud_cfg.dense_model and cid["dense_dim"] == cloud_cfg.dense_dim, cid
+# The guard is what stops a cloud collection being queried by the local provider and vice versa.
+assert _identity_problem(cid, identity) and "mode" in _identity_problem(cid, identity), cid
+
+cq = cloud.query_vectors("Mp1 reference point")
+assert isinstance(cq["dense"], models.Document) and cq["dense"].model == cloud_cfg.dense_model, cq["dense"]
+assert isinstance(cq["colbert"], models.Document), cq["colbert"]
+assert cq["colbert"].model == cloud_cfg.colbert_model, cq["colbert"]
+assert cq["dense"].text == cq["colbert"].text == "Mp1 reference point", cq
+# Sparse stays client-side crc32 even here: server-side BM25 would orphan every stored sparse vector.
+assert sorted(cq["sparse"].indices) == want_ids, cq["sparse"].indices
+assert [d.model for d in cloud.embed_dense_batch(["a", "b"])] == [cloud_cfg.dense_model] * 2
+assert [d.model for d in cloud.embed_colbert_batch(["a", "b"])] == [cloud_cfg.colbert_model] * 2
+
+# The client flag decides who embeds a Document: with cloud_inference off, qdrant-client embeds it
+# locally through fastembed instead of sending the text to the cluster.
+_real_QdrantClient = store.QdrantClient
+built = []
+store.QdrantClient = lambda **kw: built.append(kw)
+store.get_qdrant_client()
+assert built[-1]["cloud_inference"] is True, built[-1]
+assert built[-1]["url"] == cloud_cfg.qdrant_url, built[-1]
+
+_settings(embedding_mode="local", qdrant_url="https://cluster.example:6333", qdrant_api_key="k")
+store.get_qdrant_client()
+assert built[-1]["cloud_inference"] is False, built[-1]   # a raw-vector copy migration stays raw
+
+store.QdrantClient = _real_QdrantClient
+embeddings.settings = store.settings = _real_settings
+get_provider.cache_clear()
+assert isinstance(get_provider(), OnnxProvider)
 
 # --- collections are self-describing at birth ------------------------------------------------
 
@@ -213,8 +279,10 @@ client, err = _label(swapped)                           # dry run reports and wr
 assert err is None and client.updates == [], (err, client.updates)
 
 print("[check] provider seam: EMBEDDING_MODE=local -> OnnxProvider, cached per process,")
-print("[check]   unsupported mode raises ValueError, identity signature complete,")
-print("[check]   query/batch shapes, sparse stays client-side crc32,")
+print("[check]   unsupported mode and cloud-without-QDRANT_URL raise ValueError,")
+print("[check]   identity signature complete, query/batch shapes point-ready,")
+print("[check]   cloud -> Documents carrying the configured ids + cloud_inference=True client,")
+print("[check]   sparse stays client-side crc32 in both modes,")
 print("[check]   guard silent on match + names the swapped key and the label script otherwise,")
 print("[check]   ensure_collection stamps metadata at birth and never restamps,")
 print("[check]   label script stamps an unlabeled collection and refuses to overwrite")

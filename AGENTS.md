@@ -94,6 +94,7 @@ Copy `.env.example` → `.env` and fill in:
 | `EXA_API_KEY` | For monitor | Exa search API |
 | `QDRANT_HOST` | No | Default `localhost` |
 | `QDRANT_PORT` | No | Default `6333` |
+| `EMBEDDING_MODE` | No | `local` (default) = FastEmbed ONNX here; `cloud` = Qdrant Cloud Inference, needs `QDRANT_URL` + `QDRANT_API_KEY` and model ids from the cluster's Inference tab |
 
 Qdrant must be running in Docker before any ingest or search:
 
@@ -194,8 +195,14 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
 - **Three named vectors per point**: `dense` (384-dim Cosine, global recall) + `colbert` (128-dim Dot MaxSim on_disk, precision re-rank) + `sparse` (crc32-hashed raw term frequencies, `Modifier.IDF` applied server-side). `dense` + `sparse` feed the hybrid query; `colbert` feeds the re-rank path.
 - **Embedding is a provider seam, and the collection says which provider made it.** `embeddings.py` is
   the only place vectors are produced: `get_provider()` is the single `EMBEDDING_MODE` branch
-  (unset/`local` → `OnnxProvider`, the FastEmbed path verbatim; any other value raises `ValueError`
-  rather than silently embedding locally). Sparse stays client-side crc32 term frequency in *every*
+  (unset/`local` → `OnnxProvider`, the FastEmbed path verbatim; `cloud` → `CloudInferenceProvider`,
+  which needs `QDRANT_URL` and returns `models.Document` so the cluster embeds the text; any other
+  value raises `ValueError` rather than silently embedding locally). Batch methods return
+  *point-ready* values — plain lists locally, Documents in cloud mode — because `ingest` puts them
+  straight into `PointStruct.vector`. `store.get_qdrant_client` passes `cloud_inference=True` only on
+  the `QDRANT_URL` branch *and* only in cloud mode: with that flag off qdrant-client 1.19.1 embeds
+  Documents locally through fastembed (`qdrant_client.py:387`), which needs the model on the host and
+  quietly defeats the point. Sparse stays client-side crc32 term frequency in *every*
   mode — server-side BM25 would put new vectors in a different token-id space than the stored ones.
   `provider.identity()` (mode, both model names, both dims, sparse scheme) is written as collection
   metadata by `ensure_collection`, and `store.verify_collection_identity` re-reads it before

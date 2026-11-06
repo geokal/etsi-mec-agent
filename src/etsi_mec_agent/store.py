@@ -6,7 +6,10 @@ from etsi_mec_agent.embeddings import get_provider
 def get_qdrant_client() -> QdrantClient:
     """Connect to Qdrant vector database."""
     if settings.qdrant_url:
-        return QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key or None)
+        return QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key or None,
+                            # Without this the client embeds models.Document locally via fastembed
+                            # instead of sending the text to the cluster (qdrant_client.py:387).
+                            cloud_inference=settings.embedding_mode == "cloud")
     if settings.qdrant_path:
         return QdrantClient(path=settings.qdrant_path)
     return QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port,

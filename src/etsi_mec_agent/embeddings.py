@@ -63,22 +63,55 @@ class OnnxProvider:
 
     def embed_dense_batch(self, texts) -> list:
         dense_model, _ = get_embedders()
-        return list(dense_model.embed(texts))
+        return [v.tolist() for v in dense_model.embed(texts)]
 
     def embed_colbert_batch(self, texts) -> list:
         _, colbert_model = get_embedders()
-        return list(colbert_model.passage_embed(texts))
+        return [v.tolist() for v in colbert_model.passage_embed(texts)]
 
     def identity(self) -> dict:
         """The vector-space signature: two collections match only if every key matches."""
+        return _identity("local")
+
+
+def _identity(mode: str) -> dict:
+    return {
+        "mode": mode,
+        "dense_model": settings.dense_model,
+        "dense_dim": settings.dense_dim,
+        "colbert_model": settings.colbert_model,
+        "colbert_dim": settings.colbert_dim,
+        "sparse": "crc32-term-frequency",
+    }
+
+
+class CloudInferenceProvider:
+    """Server-side embeddings: text goes to the cluster, Qdrant Cloud makes the vectors.
+
+    No ONNX loads here — the client sends `models.Document` and the cluster's inference service
+    resolves it. `store.get_qdrant_client` must pass `cloud_inference=True` for that to happen:
+    with the flag off, qdrant-client 1.19.1 embeds the same Documents *locally* through fastembed
+    (qdrant_client.py:387), which needs the model on the host and quietly defeats the point.
+
+    Sparse is still built here, client-side: the stored sparse vectors use crc32 token ids with
+    server-side IDF, and the cloud's BM25 model would put new vectors in a different id space.
+    """
+
+    def query_vectors(self, text: str) -> dict:
         return {
-            "mode": "local",
-            "dense_model": settings.dense_model,
-            "dense_dim": settings.dense_dim,
-            "colbert_model": settings.colbert_model,
-            "colbert_dim": settings.colbert_dim,
-            "sparse": "crc32-term-frequency",
+            "dense": models.Document(text=text, model=settings.dense_model),
+            "colbert": models.Document(text=text, model=settings.colbert_model),
+            "sparse": _token_sparse(text),
         }
+
+    def embed_dense_batch(self, texts) -> list:
+        return [models.Document(text=t, model=settings.dense_model) for t in texts]
+
+    def embed_colbert_batch(self, texts) -> list:
+        return [models.Document(text=t, model=settings.colbert_model) for t in texts]
+
+    def identity(self) -> dict:
+        return _identity("cloud")
 
 
 @functools.lru_cache(maxsize=1)
@@ -86,7 +119,13 @@ def get_provider():
     """The one mode branch in the codebase."""
     if settings.embedding_mode in ("", "local"):
         return OnnxProvider()
+    if settings.embedding_mode == "cloud":
+        if not settings.qdrant_url:
+            raise ValueError(
+                "EMBEDDING_MODE=cloud needs QDRANT_URL (and QDRANT_API_KEY) pointing at a Qdrant "
+                "Cloud cluster: a local Docker Qdrant has no inference service")
+        return CloudInferenceProvider()
     raise ValueError(
         f"EMBEDDING_MODE={settings.embedding_mode!r} is not a supported runtime "
-        "(only 'local' ships so far)"
+        "(use 'local' for FastEmbed ONNX or 'cloud' for Qdrant Cloud Inference)"
     )
