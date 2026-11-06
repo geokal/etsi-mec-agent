@@ -23,7 +23,7 @@ stub.TextEmbedding = object
 stub.LateInteractionTextEmbedding = object
 sys.modules.setdefault("fastembed", stub)
 
-from etsi_mec_agent.search import _token_sparse
+from etsi_mec_agent.embeddings import _token_sparse
 from migrate_add_sparse import _embed_text
 
 

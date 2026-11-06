@@ -1,25 +1,13 @@
 import argparse
-import functools
 import os
 import time
-import zlib
 
-from fastembed import LateInteractionTextEmbedding, TextEmbedding
 from qdrant_client import models
 
 from etsi_mec_agent.config import settings
 from etsi_mec_agent.dedup import SimpleDoc, _dedup_docs, _stitch_parts
+from etsi_mec_agent.embeddings import get_provider
 from etsi_mec_agent.store import get_qdrant_client
-
-
-# lru_cache: Streamlit reruns the whole script per interaction and the ONNX embedders cost
-# ~30–60 s cold; the CLI calls this once per process either way.
-@functools.lru_cache(maxsize=1)
-def get_embedders():
-    """The two local ONNX embedders, loaded once per process."""
-    dense_model = TextEmbedding(settings.dense_model)
-    colbert_model = LateInteractionTextEmbedding(settings.colbert_model)
-    return dense_model, colbert_model
 
 
 def build_filter(current_only: bool = True, diagrams_only: bool = False):
@@ -46,25 +34,10 @@ def build_filter(current_only: bool = True, diagrams_only: bool = False):
 import re as _re
 
 
-def _tokenize(text: str) -> list[str]:
-    """Lowercase, strip punctuation, split into word tokens."""
-    return _re.findall(r"[a-z0-9]+", text.lower())
-
-def _token_sparse(text: str) -> models.SparseVector:
-    """Raw term-frequency sparse vector; token ids are crc32 hashes so no shared
-    vocabulary file is needed between ingest and query time. Qdrant applies IDF
-    weighting at query time via Modifier.IDF on the collection config."""
-    tf: dict[int, int] = {}
-    for tok in _tokenize(text):
-        i = zlib.crc32(tok.encode()) & 0x7FFFFFFF
-        tf[i] = tf.get(i, 0) + 1
-    return models.SparseVector(indices=list(tf), values=[float(v) for v in tf.values()])
-
-
 def _run_hybrid_retrieval(
     client,
-    query_text: str,
     query_dense: list,
+    query_sparse,
     top_k: int = 5,
     prefetch_limit: int = 50,
     query_filter=None,
@@ -88,7 +61,7 @@ def _run_hybrid_retrieval(
                 query=query_dense, using="dense", limit=prefetch_limit, filter=query_filter
             ),
             models.Prefetch(
-                query=_token_sparse(query_text), using="sparse",
+                query=query_sparse, using="sparse",
                 limit=prefetch_limit, filter=query_filter,
             ),
         ],
@@ -502,11 +475,10 @@ def search_specs(
     # excerpts while the display is 5, and _stitch_parts can only merge parts that were
     # retrieved at all, so the pool must be 3x the evidence budget rather than its width.
     prefetch_limit = max(prefetch_limit, fetch_k * 3)
-    dense_model, colbert_model = get_embedders()
+    qv = get_provider().query_vectors(query_text)
+    query_dense, query_colbert = qv["dense"], qv["colbert"]
 
     t0 = time.time()
-    query_dense = list(dense_model.embed([query_text]))[0].tolist()
-    query_colbert = list(colbert_model.query_embed(query_text))[0].tolist()
 
     query_filter = build_filter(current_only=current_only, diagrams_only=diagrams_only)
     notes = (["current editions only"] if current_only else []) + \
@@ -521,8 +493,8 @@ def search_specs(
               f"{filter_info}")
         hybrid_hits = _run_hybrid_retrieval(
             client=client,
-            query_text=query_text,
             query_dense=query_dense,
+            query_sparse=qv["sparse"],
             top_k=fetch_k * 6,        # fetch 6× more so dedup still fills the evidence budget
             prefetch_limit=max(prefetch_limit * 4, 100),
             query_filter=query_filter,

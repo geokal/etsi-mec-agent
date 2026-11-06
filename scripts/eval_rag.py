@@ -27,7 +27,8 @@ from qdrant_client import models
 
 from etsi_mec_agent.config import settings
 from etsi_mec_agent.dedup import SimpleDoc, _dedup_docs, _stitch_parts
-from etsi_mec_agent.search import _run_hybrid_retrieval, build_filter, get_embedders
+from etsi_mec_agent.embeddings import get_provider
+from etsi_mec_agent.search import _run_hybrid_retrieval, build_filter
 from etsi_mec_agent.store import get_qdrant_client
 
 
@@ -112,15 +113,15 @@ def hits_colbert(client, q_dense, q_colbert, k):
     return [(doc_key(d.meta), d.content) for d in _dedup_docs(docs, keep=k)]
 
 
-def hits_hybrid(client, q_text, q_dense, k):
-    raw = _run_hybrid_retrieval(client, q_text, q_dense, top_k=k * 6, prefetch_limit=100)  # defaults from search_specs
+def hits_hybrid(client, q_dense, q_sparse, k):
+    raw = _run_hybrid_retrieval(client, q_dense, q_sparse, top_k=k * 6, prefetch_limit=100)  # defaults from search_specs
     raw = _dedup_docs(raw, keep=k)  # same post-fusion dedup as search_specs
     return [(doc_key(d.meta), d.content or "") for d in raw]
 
 
-def hits_aggregate(client, q_text, q_dense, ctx=15, per_doc=2):
+def hits_aggregate(client, q_dense, q_sparse, ctx=15, per_doc=2):
     """What --answer sees: contiguous page parts stitched, up to per_doc excerpts per doc."""
-    raw = _run_hybrid_retrieval(client, q_text, q_dense, top_k=ctx * 6, prefetch_limit=100)
+    raw = _run_hybrid_retrieval(client, q_dense, q_sparse, top_k=ctx * 6, prefetch_limit=100)
     docs = _dedup_docs(_stitch_parts(raw), keep=ctx, per_doc=per_doc)
     return [(doc_key(d.meta), d.content) for d in docs]
 
@@ -148,7 +149,7 @@ def main():
 
     client = get_qdrant_client()
     corpus = load_corpus(client)
-    dense_model, colbert_model = get_embedders()
+    provider = get_provider()
 
     modes = {"colbert": [], "hybrid": []}
     agg = []
@@ -157,12 +158,12 @@ def main():
         if not evidence_ok(q, corpus):
             print(f"{q['id']:4} {'MISSING':9} {'-':8} {'-':8} {'-':10} {q['query'][:50]}")
             continue
-        q_dense = list(dense_model.embed([q["query"]]))[0].tolist()
-        q_colbert = list(colbert_model.query_embed(q["query"]))[0].tolist()
+        qv = provider.query_vectors(q["query"])
+        q_dense, q_colbert = qv["dense"], qv["colbert"]
 
         r_c = first_hit_rank(hits_colbert(client, q_dense, q_colbert, k), q, k)
-        r_h = first_hit_rank(hits_hybrid(client, q["query"], q_dense, k), q, k)
-        r_a = first_hit_rank(hits_aggregate(client, q["query"], q_dense, ctx=window, per_doc=per_doc), q, window)
+        r_h = first_hit_rank(hits_hybrid(client, q_dense, qv["sparse"], k), q, k)
+        r_a = first_hit_rank(hits_aggregate(client, q_dense, qv["sparse"], ctx=window, per_doc=per_doc), q, window)
         modes["colbert"].append(r_c is not None)
         modes["hybrid"].append(r_h is not None)
         agg.append(r_a is not None)

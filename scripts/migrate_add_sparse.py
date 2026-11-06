@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from qdrant_client import models
 
 from etsi_mec_agent.config import settings
-from etsi_mec_agent.search import _token_sparse
+from etsi_mec_agent.embeddings import _token_sparse
 from etsi_mec_agent.store import ensure_collection, get_qdrant_client
 
 NEW = settings.qdrant_index + "_v2"

@@ -145,15 +145,17 @@ def verify() -> None:
     stub = types.ModuleType("fastembed")
     stub.LateInteractionTextEmbedding = stub.TextEmbedding = object
     sys.modules["fastembed"] = stub
+    import etsi_mec_agent.embeddings as embeddings
     import etsi_mec_agent.search as search
 
-    class _V(list):
-        def tolist(self):
-            return list(self)
-
-    search.get_embedders = lambda: (
-        types.SimpleNamespace(embed=lambda t: [_V([0.1] * settings.dense_dim) for _ in t]),
-        types.SimpleNamespace(query_embed=lambda t: [_V([[0.0] * 128] * 4)]),
+    # The seam moved: search_specs now asks get_provider() for all three query vectors,
+    # so the stub replaces the provider, not the embedder pair it used to build.
+    search.get_provider = lambda: types.SimpleNamespace(
+        query_vectors=lambda t: {
+            "dense": [0.1] * settings.dense_dim,
+            "colbert": [[0.0] * 128 for _ in range(4)],
+            "sparse": embeddings._token_sparse(t),
+        }
     )
 
     docs = search.search_specs("reference point MEC platform orchestrator", top_k=5, use_bm25=True)

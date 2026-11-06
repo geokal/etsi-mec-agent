@@ -21,14 +21,17 @@ class Settings:
     llm_api_key: str = os.getenv("LLM_API_KEY", "")
     llm_model: str = os.getenv("LLM_MODEL", "openrouter/free")
 
+    # Embedding runtime: "local" (FastEmbed ONNX) is the only one shipped so far; every other
+    # runtime arrives behind this switch with its own collection identity.
+    embedding_mode: str = os.getenv("EMBEDDING_MODE", "local")
+
     # FastEmbed Dense Embedding (for fast global retrieval)
     dense_model: str = os.getenv("DENSE_MODEL", "BAAI/bge-small-en-v1.5")
-    dense_dim: int = 384
-    embedding_dim: int = 384  # alias used by Haystack store and graph scripts
+    dense_dim: int = int(os.getenv("DENSE_DIM", "384"))
 
     # FastEmbed ColBERT Multi-Vector Late-Interaction (for precise table/token matching)
     colbert_model: str = os.getenv("COLBERT_MODEL", "colbert-ir/colbertv2.0")
-    colbert_dim: int = 128
+    colbert_dim: int = int(os.getenv("COLBERT_DIM", "128"))
 
     # Extracted diagrams storage
     diagrams_dir: str = os.getenv("DIAGRAMS_DIR", "data/diagrams")
