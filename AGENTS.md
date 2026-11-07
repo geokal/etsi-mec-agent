@@ -42,7 +42,8 @@ Never use `pip` directly. Do not touch `.venv/`.
 ```
 src/etsi_mec_agent/
   config.py          # frozen Settings dataclass — all env vars here
-  store.py           # Qdrant client + ensure_collection()
+  embeddings.py      # the provider seam: EMBEDDING_MODE -> provider, sparse tokenizer, identity()
+  store.py           # Qdrant client + ensure_collection() + verify_collection_identity()
   ingest.py          # PDF → chunks → embed → upsert  (CLI: uv run python -m etsi_mec_agent.ingest)
   search.py          # hybrid search + LLM answer       (CLI: uv run python -m etsi_mec_agent.search)
   dedup.py           # rank shaping (stitch + dedup) — must stay stdlib-only, so scripts/check_dedup_stitch.py runs without ONNX
@@ -67,9 +68,16 @@ scripts/
   check_chunking.py         # asserts for chunking.py: rows never cut, headers repeated; no models
   check_eval_golden.py      # asserts eval_rag's golden sets are answerable from the live collection; no models
   check_answer_grounding.py # asserts generate_answer labels excerpts by cover identity and audits its own citations; no models, openai is faked
+  check_embedder_swap.py    # asserts the provider seam and the identity guard; no models, no corpus
+  #                         # (it writes its own blank PDF — data/specs/ is gitignored), fastembed blocked
+  label_collection_identity.py # stamp the embedding identity onto a collection that predates the guard
+  #                            # (metadata only, no re-embed); dry run by default, --apply writes,
+  #                            # and --force is needed to overwrite a different identity claim
   eval_rag.py               # golden-question recall@k, both paths + the --answer budget
   migrate_add_sparse.py     # copy points into a new collection that has 'sparse' (no re-embed);
-  #                         # resolves the alias and refuses an existing --target rather than clobbering it
+  #                         # resolves the alias, refuses an existing --target rather than clobbering
+  #                         # it, and refuses a source that records no embedding identity (a copy
+  #                         # inherits the SOURCE's claim, never the current provider's)
   graph_visualize.py        # force-directed spec relationship graph
 
 data/
@@ -89,6 +97,7 @@ Copy `.env.example` → `.env` and fill in:
 | `EXA_API_KEY` | For monitor | Exa search API |
 | `QDRANT_HOST` | No | Default `localhost` |
 | `QDRANT_PORT` | No | Default `6333` |
+| `EMBEDDING_MODE` | No | `local` (default) = FastEmbed ONNX here; `cloud` = Qdrant Cloud Inference, needs `QDRANT_URL` + `QDRANT_API_KEY` and model ids from the cluster's Inference tab |
 
 Qdrant must be running in Docker before any ingest or search:
 
@@ -110,6 +119,12 @@ that already exists** in one action, so moving a name onto a new collection is a
 while both collections stay alive. `delete_collection` drops its aliases silently and the name then
 resolves to nothing, so re-point before deleting; and an alias cannot take the name of a collection
 that still exists (409).
+
+If a gate or search that touches Qdrant dies with `httpx.InvalidURL: Invalid port: ':1]'`, the shell
+exports a `NO_PROXY` containing a bracketed IPv6 entry (`[::1]`) that httpx cannot parse when it
+builds its proxy mounts — the repo code is fine. Run it as
+`env -u NO_PROXY uv run python scripts/<gate>.py` (observed 2026-11-07 in the agent shell; a normal
+terminal without that variable is unaffected).
 
 ---
 
@@ -158,6 +173,10 @@ uv run python scripts/backfill_spec_identity.py
 uv run python scripts/backfill_spec_identity.py --apply
 uv run python scripts/backfill_spec_identity.py --verify
 
+# Label a pre-guard collection with the current provider identity (metadata only; dry run first)
+uv run python scripts/label_collection_identity.py
+uv run python scripts/label_collection_identity.py --apply
+
 # Visualise spec relationships
 uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
 ```
@@ -183,7 +202,28 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
 ## Key design decisions — do not change without understanding why
 
 - **Three named vectors per point**: `dense` (384-dim Cosine, global recall) + `colbert` (128-dim Dot MaxSim on_disk, precision re-rank) + `sparse` (crc32-hashed raw term frequencies, `Modifier.IDF` applied server-side). `dense` + `sparse` feed the hybrid query; `colbert` feeds the re-rank path.
-- **`--use-bm25` does NOT use Haystack** — the collection was created outside Haystack and `QdrantDocumentStore` rejects it. Fusion happens inside Qdrant: `search.py::_run_hybrid_retrieval` sends two `Prefetch`es plus `FusionQuery(fusion=models.Fusion.RRF)`. `Fusion.RRF` is an enum member — passing it called (`RRF()`) raises `TypeError: 'Fusion' object is not callable`.
+- **Embedding is a provider seam, and the collection says which provider made it.** `embeddings.py` is
+  the only place vectors are produced: `get_provider()` is the single `EMBEDDING_MODE` branch
+  (unset/`local` → `OnnxProvider`, the FastEmbed path verbatim; `cloud` → `CloudInferenceProvider`,
+  which needs `QDRANT_URL` and returns `models.Document` so the cluster embeds the text; any other
+  value raises `ValueError` rather than silently embedding locally). Batch methods return
+  *point-ready* values — plain lists locally, Documents in cloud mode — because `ingest` puts them
+  straight into `PointStruct.vector`. `store.get_qdrant_client` passes `cloud_inference=True` only on
+  the `QDRANT_URL` branch *and* only in cloud mode: with that flag off qdrant-client 1.19.1 embeds
+  Documents locally through fastembed (`qdrant_client.py:387`), which needs the model on the host and
+  quietly defeats the point. Sparse stays client-side crc32 term frequency in *every*
+  mode — server-side BM25 would put new vectors in a different token-id space than the stored ones.
+  `provider.identity()` (mode, both model names, both dims, sparse scheme) is written as collection
+  metadata by `ensure_collection`, and `store.verify_collection_identity` re-reads it before
+  `search_specs`, `eval_rag` and a non-`--recreate-index` ingest embed anything: querying a
+  collection made by another model returns ranked noise with no error, so it aborts naming the
+  mismatched key and both values instead. The guard runs *before* the embedders load (cold ONNX is
+  30-60 s) and reads it from `store`, not `search`, so `backfill_spec_identity.py --verify`'s
+  monkeypatched provider cannot talk the guard out of firing. A collection that predates the guard
+  has no metadata: **run `uv run python scripts/label_collection_identity.py --apply` before pointing
+  a checkout at it** — that script records the claim you make by running it, it cannot verify the
+  stored vectors.
+- **`--use-bm25` does NOT use Haystack** — the collection was created outside Haystack and `QdrantDocumentStore` rejects it. Fusion happens inside Qdrant: `search.py::_run_hybrid_retrieval` nests the dense and sparse `Prefetch`es under one `Prefetch` whose `FusionQuery(fusion=models.Fusion.RRF)` pool the outer query then rescores with the ColBERT multivector — recall from both legs, ordering from late interaction (the vendor's prefetch-fuse-rerank shape; probed nestable in qdrant-client 1.19.1). RRF stays rank-based on purpose: a Cosine leg and a TF-IDF leg have incomparable scores. `Fusion.RRF` is an enum member — passing it called (`RRF()`) raises `TypeError: 'Fusion' object is not callable`.
 - **Display and evidence are two budgets.** `search_specs` prints `_dedup_docs(stitched, keep=--top-k)` (one excerpt per document) and hands the LLM `_dedup_docs(stitched, keep=--answer-context, per_doc=--per-doc)` over the same stitched list. A page the 300-word window splits is stored as `chunk_part 1 of 2` / `2 of 2`, so `_stitch_parts()` runs first: one chunk per document used to discard the continuation and hand the LLM a table ending mid-cell. Pass 1 of `_dedup_docs` compares the **whole** image-stripped text, not a leading 400-char window: the row-aware chunker repeats a table's header and clause at the top of every chunk of it, so two chunks of one table share far more than 400 characters and differ only in the rows past them — the window was discarding exactly the continuation the answer needed, before `--per-doc` ever got to spend its quota.
 - **Citations are audited, not just requested.** `search.py::_source_label` names an excerpt by the
   identity stamped on its PDF (`MEC-003 V4.1.1 p.15`) and the filename never enters the prompt — a
@@ -241,8 +281,10 @@ uv run python scripts/graph_visualize.py --limit 3000 --threshold 0.55
 
 1. Config changes → `config.py` only (frozen dataclass, env-var backed).
 2. New Qdrant vector → `store.py::ensure_collection` + a `scripts/backfill_*.py` for existing collections.
-3. New CLI flag → add to `argparse` in the relevant `main()` and thread through the call chain.
-4. Do not add new top-level imports that crash if optional packages are missing — use lazy `try/except ImportError`.
+3. New embedding runtime → a provider class in `embeddings.py` with its own `identity()`, a branch in
+   `get_provider()`, and a label/migration path for collections that already exist.
+4. New CLI flag → add to `argparse` in the relevant `main()` and thread through the call chain.
+5. Do not add new top-level imports that crash if optional packages are missing — use lazy `try/except ImportError`.
 
 ---
 

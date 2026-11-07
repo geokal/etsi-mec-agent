@@ -4,18 +4,21 @@
 
 Exercises three retrieval paths from etsi_mec_agent.search:
   colbert   — dense prefetch + ColBERT MaxSim rescore (search_specs path 2)
-  hybrid    — Qdrant server-side dense+sparse prefetch with RRF fusion (_run_hybrid_retrieval)
-  aggregate — what --answer reads: the hybrid path with contiguous page parts stitched first,
-              measured over the same --answer-context / --per-doc budget the CLI uses
-              (defaults 15 / 2). This column is the LLM's evidence, not the --top-k printed.
+  hybrid    — dense+sparse prefetch fused by RRF, rescored by ColBERT (_run_hybrid_retrieval)
+  aggregate — what --answer reads: the same hybrid path over the --answer-context / --per-doc
+              budget the CLI uses (defaults 15 / 2). This column is the LLM's evidence, not the
+              --top-k printed.
+
+All three stitch contiguous page parts before they dedup, and all three measure behind
+build_filter(), because that is what search_specs ships.
 
 A question passes when a top-k chunk from one of its expected specs contains one of its
 expected keywords. `docs` names content-derived spec identities (MEC-003), not filenames, and
 is a **set** because a term is often defined normatively in more than one live spec — scoring
-only one of them punishes a correct retrieval. Every path is measured behind build_filter() — the same current-editions-only filter
-search_specs ships — because 59 of the 106 doc_ids name a different spec than the text
-they hold. Questions whose keywords exist nowhere in the expected spec are flagged
-EVIDENCE-MISSING (bad golden data, not a retrieval failure) so the numbers stay honest.
+only one of them punishes a correct retrieval. The current-editions filter matters because 59 of
+the 106 doc_ids name a different spec than the text they hold. Questions whose keywords exist
+nowhere in the expected spec are flagged EVIDENCE-MISSING (bad golden data, not a retrieval
+failure) so the numbers stay honest.
 """
 import argparse
 import sys
@@ -27,8 +30,9 @@ from qdrant_client import models
 
 from etsi_mec_agent.config import settings
 from etsi_mec_agent.dedup import SimpleDoc, _dedup_docs, _stitch_parts
-from etsi_mec_agent.search import _run_hybrid_retrieval, build_filter, get_embedders
-from etsi_mec_agent.store import get_qdrant_client
+from etsi_mec_agent.embeddings import get_provider
+from etsi_mec_agent.search import _run_hybrid_retrieval, build_filter
+from etsi_mec_agent.store import get_qdrant_client, verify_collection_identity
 
 
 def doc_key(meta):
@@ -100,6 +104,7 @@ def evidence_ok(q, corpus):
 
 
 def hits_colbert(client, q_dense, q_colbert, k):
+    """The ColBERT rescore column: search_specs' own request, then its stitch-then-dedup."""
     res = client.query_points(
         collection_name=settings.qdrant_index,
         prefetch=models.Prefetch(query=q_dense, using="dense", limit=25, filter=build_filter()),
@@ -107,20 +112,33 @@ def hits_colbert(client, q_dense, q_colbert, k):
         query_filter=build_filter(),
     )
 
-    # Same wrapper search_specs builds for its own hits, so _dedup_docs applies identically.
+    # Same wrapper search_specs builds for its own hits, so _stitch_parts and _dedup_docs apply
+    # identically (search.py:613-615 stitches before it dedups).
     docs = [SimpleDoc(h.payload.get("text", ""), h.payload) for h in res.points]
-    return [(doc_key(d.meta), d.content) for d in _dedup_docs(docs, keep=k)]
+    return [(doc_key(d.meta), d.content) for d in _dedup_docs(_stitch_parts(docs), keep=k)]
 
 
-def hits_hybrid(client, q_text, q_dense, k):
-    raw = _run_hybrid_retrieval(client, q_text, q_dense, top_k=k * 6, prefetch_limit=100)  # defaults from search_specs
-    raw = _dedup_docs(raw, keep=k)  # same post-fusion dedup as search_specs
+def hits_hybrid(client, q_dense, q_sparse, q_colbert, k):
+    """The display path search_specs ships: its over-fetch budget, filter and stitch order."""
+    raw = _run_hybrid_retrieval(client, q_dense, q_sparse, q_colbert,
+                                top_k=k * 6, prefetch_limit=100,  # defaults from search_specs
+                                query_filter=build_filter())
+    # search.py:517 stitches before :528 dedups, so a page split into parts 1/2 and 2/2 is one
+    # excerpt there. Deduping first drops the lower-ranked part — and with it a keyword the
+    # shipped display actually shows, which this column would then report as a miss.
+    raw = _dedup_docs(_stitch_parts(raw), keep=k)
     return [(doc_key(d.meta), d.content or "") for d in raw]
 
 
-def hits_aggregate(client, q_text, q_dense, ctx=15, per_doc=2):
+def hits_aggregate(client, q_dense, q_sparse, q_colbert, ctx=15, per_doc=2):
     """What --answer sees: contiguous page parts stitched, up to per_doc excerpts per doc."""
-    raw = _run_hybrid_retrieval(client, q_text, q_dense, top_k=ctx * 6, prefetch_limit=100)
+    # search_specs' answer budget, mirrored: prefetch_limit = max(25, fetch_k * 3), then the
+    # hybrid leg's max(that * 4, 100) (search.py:491,514). A flat 100 under-filled the pool for
+    # any ctx above 8, so this column measured a narrower retrieval than --answer runs.
+    pool = max(max(25, ctx * 3) * 4, 100)
+    raw = _run_hybrid_retrieval(client, q_dense, q_sparse, q_colbert,
+                                top_k=ctx * 6, prefetch_limit=pool,
+                                query_filter=build_filter())
     docs = _dedup_docs(_stitch_parts(raw), keep=ctx, per_doc=per_doc)
     return [(doc_key(d.meta), d.content) for d in docs]
 
@@ -135,6 +153,7 @@ def first_hit_rank(hits, q, k):
 
 
 def main():
+    """Score the golden questions over both retrieval paths plus the --answer evidence budget."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--top-k", type=int, default=5)
     ap.add_argument("--answer-context", type=int, default=15,
@@ -147,8 +166,9 @@ def main():
     k, window, per_doc = args.top_k, args.answer_context, args.per_doc
 
     client = get_qdrant_client()
+    verify_collection_identity(client)   # a model swap would score noise, not answer questions
     corpus = load_corpus(client)
-    dense_model, colbert_model = get_embedders()
+    provider = get_provider()
 
     modes = {"colbert": [], "hybrid": []}
     agg = []
@@ -157,12 +177,13 @@ def main():
         if not evidence_ok(q, corpus):
             print(f"{q['id']:4} {'MISSING':9} {'-':8} {'-':8} {'-':10} {q['query'][:50]}")
             continue
-        q_dense = list(dense_model.embed([q["query"]]))[0].tolist()
-        q_colbert = list(colbert_model.query_embed(q["query"]))[0].tolist()
+        qv = provider.query_vectors(q["query"])
+        q_dense, q_colbert = qv["dense"], qv["colbert"]
 
         r_c = first_hit_rank(hits_colbert(client, q_dense, q_colbert, k), q, k)
-        r_h = first_hit_rank(hits_hybrid(client, q["query"], q_dense, k), q, k)
-        r_a = first_hit_rank(hits_aggregate(client, q["query"], q_dense, ctx=window, per_doc=per_doc), q, window)
+        r_h = first_hit_rank(hits_hybrid(client, q_dense, qv["sparse"], q_colbert, k), q, k)
+        r_a = first_hit_rank(hits_aggregate(client, q_dense, qv["sparse"], q_colbert,
+                                            ctx=window, per_doc=per_doc), q, window)
         modes["colbert"].append(r_c is not None)
         modes["hybrid"].append(r_h is not None)
         agg.append(r_a is not None)

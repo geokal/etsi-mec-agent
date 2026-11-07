@@ -10,29 +10,17 @@ from typing import List
 
 import pymupdf
 import pymupdf4llm
-from fastembed import LateInteractionTextEmbedding, TextEmbedding
 from qdrant_client.models import PointStruct
 
 from etsi_mec_agent.chunking import chunk_page
 from etsi_mec_agent.config import settings
+from etsi_mec_agent.embeddings import _token_sparse, get_provider
 from etsi_mec_agent.identity import stamp as identity_stamp
-from etsi_mec_agent.search import _token_sparse
-from etsi_mec_agent.store import ensure_collection, get_qdrant_client
+from etsi_mec_agent.store import ensure_collection, get_qdrant_client, verify_collection_identity
 
 # Ensure stdout flushes immediately in real-time
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
-
-
-def get_embedders():
-    """Load CPU-optimized ONNX models for Dense and ColBERT embeddings."""
-    print(f"Loading Dense embedder ({settings.dense_model})...", flush=True)
-    dense_model = TextEmbedding(settings.dense_model)
-
-    print(f"Loading ColBERT late-interaction embedder ({settings.colbert_model})...", flush=True)
-    colbert_model = LateInteractionTextEmbedding(settings.colbert_model)
-
-    return dense_model, colbert_model
 
 
 def extract_primary_heading(markdown_text: str) -> str:
@@ -138,8 +126,7 @@ def render_vector_figures(pdf_path: Path, diagrams_dir: Path, seen: set) -> dict
 
 def ingest_single_pdf(
     pdf_path: Path,
-    dense_model: TextEmbedding,
-    colbert_model: LateInteractionTextEmbedding,
+    provider,
     client,
     batch_size: int = 16,      # raised from 4 → 16: ~3-4x faster on CPU ONNX, still safe
     extract_diagrams: bool = True,
@@ -292,8 +279,8 @@ def ingest_single_pdf(
                   f"(chunk {min(i + batch_size, total_chunks)}/{total_chunks})...", flush=True)
 
         try:
-            dense_embeddings   = list(dense_model.embed(batch_texts))
-            colbert_embeddings = list(colbert_model.passage_embed(batch_texts))
+            dense_embeddings   = provider.embed_dense_batch(batch_texts)
+            colbert_embeddings = provider.embed_colbert_batch(batch_texts)
         except Exception as e:
             print(f"    [WARNING] Batch embedding error: {e}. Trying individual fallback...", flush=True)
             dense_embeddings   = []
@@ -301,8 +288,8 @@ def ingest_single_pdf(
             valid_indices      = []
             for idx, single_text in enumerate(batch_texts):
                 try:
-                    d = list(dense_model.embed([single_text]))[0]
-                    c = list(colbert_model.passage_embed([single_text]))[0]
+                    d = provider.embed_dense_batch([single_text])[0]
+                    c = provider.embed_colbert_batch([single_text])[0]
                     dense_embeddings.append(d)
                     colbert_embeddings.append(c)
                     valid_indices.append(idx)
@@ -314,10 +301,11 @@ def ingest_single_pdf(
 
         # Embedded text and stored text differ on purpose (B3): the vector side carries the spec
         # and clause context a bare "7.2.1" needs, the payload side stays the page markdown.
+        # The provider returns point-ready values: lists locally, models.Document in cloud mode.
         batch_points = [
             PointStruct(
                 id=str(uuid.uuid4()),
-                vector={"dense": d_vec.tolist(), "colbert": c_vec.tolist(),
+                vector={"dense": d_vec, "colbert": c_vec,
                         "sparse": _token_sparse(embed_text)},
                 payload={"text": body, **meta},
             )
@@ -354,10 +342,30 @@ def ingest_pdfs(
         return 0
 
     if not dry_run:
+        if recreate_index:
+            # Fail before the wipe, not after: the ONNX models construct lazily on first use, so a
+            # missing package or a failed model download used to surface inside the first batch's
+            # except, by which point --recreate-index had already emptied the collection. One
+            # throwaway embedding forces both constructions (get_embedders builds dense and
+            # ColBERT together); in cloud mode it returns a Document and touches no network.
+            get_provider().embed_dense_batch(["warm the embedders before recreating the collection"])
         ensure_collection(recreate=recreate_index)
     client = get_qdrant_client()
+    if not dry_run:
+        # Without --recreate-index the new points land beside the stored ones: if those came from
+        # another provider, one collection would hold two vector spaces and retrieval would score
+        # them together.
+        verify_collection_identity(client)
     # Dry-run: skip model loading entirely — nothing gets embedded or written.
-    dense_model, colbert_model = (None, None) if dry_run else get_embedders()
+    provider = None if dry_run else get_provider()
+    if not dry_run and not recreate_index:
+        # An incremental run has no pre-wipe warm-up, and the batch loop below catches every
+        # embedding error: a provider that cannot construct would be retried per chunk, each chunk
+        # printed [SKIPPED] as if it were oversized, and the command would exit 0 having indexed
+        # nothing. One throwaway embedding makes that failure raise here instead — after the
+        # identity guard (nothing may be embedded into a collection another provider made) and
+        # before any chunk is at risk. --recreate-index already warmed above.
+        provider.embed_dense_batch(["warm the embedders before the batch loop"])
 
     if recreate_index:
         # A wipe empties the collection, so --skip-existing would skip nothing;
@@ -390,7 +398,7 @@ def ingest_pdfs(
         seen_content[digest] = pdf_path.name
         print(f"[{idx}/{len(valid_files)}] {pdf_path.name}", flush=True)
         chunks = ingest_single_pdf(
-            pdf_path, dense_model, colbert_model, client,
+            pdf_path, provider, client,
             extract_diagrams=extract_diagrams,
             skip_existing=skip_existing,
             dry_run=dry_run,
