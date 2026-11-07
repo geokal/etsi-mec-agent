@@ -18,12 +18,12 @@ plain `qdrant_client`, and `QdrantDocumentStore` rejects a collection it did not
 Measured on 16 golden engineering questions; reproduce with `uv run python scripts/eval_rag.py --top-k 5`.
 Full record, including what the numbers cannot show: **[RESULTS.md](RESULTS.md)**.
 
-| | start (26 Sep) | now (11 Oct) |
+| | start (26 Sep) | now (7 Nov) |
 |---|---|---|
 | Evidence surviving the 15-excerpt answer budget | 11/16 | **14/16** |
-| Hybrid recall@5 | 10/16 | **12/16** |
-| Union across retrieval paths | 12/16 | **15/16** |
-| Qdrant-side hybrid query (p50, 5,254 chunks) | not measured | **15 ms** |
+| Hybrid recall@5 | 10/16 | **14/16** |
+| Union across retrieval paths | 12/16 | **14/16** |
+| Qdrant-side hybrid query (p50, 5,254 chunks) | not measured | **31 ms** |
 | Index size | 4,669 word-window chunks | **5,254** row/clause chunks, p90 2 parts/page |
 | Documents the corpus actually held | 106 files, 59 misnamed | **54**, identity read off the cover |
 

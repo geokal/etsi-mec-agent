@@ -14,10 +14,16 @@ repository, it says so. Single author, 26 Sep – 11 Oct 2026.
 | 2026-10-06 (§5d) | 11 | 11 | 12 | — | cover-derived identity, edition filtering, `content_md5` quota |
 | 2026-10-08 (§5e) | 11 | 12 | **14** | 15 | row-/clause-aware chunking with the clause floor |
 | 2026-10-11 (§5i) | 11 | 12 | **14** | 15 | review-round fixes — identical, i.e. rank-neutral |
+| 2026-11-07 (c183eb2) | 11 | **14** | **14** | 14 | RRF pool rescored by ColBERT MaxSim (nested prefetch-fuse-rerank) |
 
 `aggregate@15` counts the questions whose evidence survives the 15-excerpt budget that is actually
 handed to the LLM — the metric that decides answer quality, unlike recall@5. Net movement:
 **11/16 → 14/16 (+27%)**, union 12/16 → 15/16.
+
+The 2026-11-07 rescore moved hybrid@5 12→14 and left aggregate@15 at 14, but the union fell 15→14:
+q12 left the hybrid top-5 (the ColBERT path never held it), so both top-5 paths now miss it — it
+still reaches the LLM at @4 inside the answer budget, which is why the evidence metric did not
+move with the portfolio. n = 16, so read +2 and −1 as one-question swings, not trends.
 
 The limits of that number, stated before someone finds them: **n = 16**, so one question is 6
 points. Three goldens were rewritten mid-project because they were unanswerable as written (q12's
@@ -57,10 +63,18 @@ Corpus defects found and fixed, which is most of what the work was:
 
 ## 3. Retrieval latency
 
-25 hybrid queries against the live collection (two prefetches + RRF fusion, `is_current` filter,
-15 points with payload returned), random 384-d dense vector + 24-term sparse, timed client-side:
+25 hybrid queries against the live collection (`is_current` filter, payload returned), random
+384-d dense vector + 24-term sparse (+ a random 4×128 ColBERT multivector once the rescore existed),
+timed client-side:
 
-**p50 15.3 ms · p95 31.3 ms · min 9.2 ms · max 290.6 ms** (the max is the first query, cold).
+| Measured | shape | p50 | p95 | min | max |
+|---|---|---|---|---|---|
+| 2026-10-11 | two prefetches + RRF, per-leg 50, 15 points | 15.3 ms | 31.3 ms | 9.2 ms | 290.6 ms (cold) |
+| 2026-11-07 | same legs + ColBERT MaxSim rescore, 15 points | 27.1 ms | 70.8 ms | 12.5 ms | 174.3 ms |
+| 2026-11-07 | shipped `--top-k 5` shape: per-leg 200, pool 30, + rescore | 31.0 ms | 38.6 ms | 11.0 ms | 50.1 ms |
+
+The rescore pass is the delta between the first two rows — roughly +12 ms p50 at identical leg
+limits.
 
 This is Qdrant-side only. It excludes the ONNX embedding of the query text and the LLM round-trip,
 so it is not an end-to-end latency claim — the honest statement is "retrieval is tens of
@@ -132,4 +146,6 @@ repository — the ETSI documents themselves are copyrighted by ETSI, are not co
 (`data/specs/` is gitignored), and are fetched by `scripts`/`tools` from ETSI's own server. One
 author, no users, no traffic, no deployment. **Answer quality is not benchmarked — retrieval is**,
 and the LLM is a free-tier router. The `batch_size` 4 → 16 ingest speedup is a code comment, not a
-measurement. q11 and q12 are still missed by at least one path each, with the causes recorded in §5b.
+measurement. As of the 2026-11-07 run, q12 and q15 are missed by both top-5 paths (q12 still reaches
+the answer budget at @4, q15 reaches nothing) and q05 reaches the top-5 but not the stitched
+budget; the earlier causes are recorded in §5b.
