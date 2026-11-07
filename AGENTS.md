@@ -68,7 +68,8 @@ scripts/
   check_chunking.py         # asserts for chunking.py: rows never cut, headers repeated; no models
   check_eval_golden.py      # asserts eval_rag's golden sets are answerable from the live collection; no models
   check_answer_grounding.py # asserts generate_answer labels excerpts by cover identity and audits its own citations; no models, openai is faked
-  check_embedder_swap.py    # asserts the provider seam and the identity guard; no models, fastembed is blocked
+  check_embedder_swap.py    # asserts the provider seam and the identity guard; no models, no corpus
+  #                         # (it writes its own blank PDF — data/specs/ is gitignored), fastembed blocked
   label_collection_identity.py # stamp the embedding identity onto a collection that predates the guard
   #                            # (metadata only, no re-embed); dry run by default, --apply writes,
   #                            # and --force is needed to overwrite a different identity claim

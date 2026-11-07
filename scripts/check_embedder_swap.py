@@ -2,16 +2,18 @@
 
     uv run python scripts/check_embedder_swap.py
 
-No models, no Qdrant, no .env bending: `EMBEDDING_MODE` is pinned before `config` is imported and
-`fastembed` is blocked in `sys.modules`, so a provider that touched ONNX here would fail instead of
-passing. What it pins: the mode switch picks the ONNX provider and names its own limits, cloud mode
-sends `models.Document` (and needs `QDRANT_URL` plus the client's `cloud_inference` flag), the
-identity signature is what the guard compares, sparse stays client-side crc32 in every mode, and
-`ensure_collection` stamps that signature at birth.
+No models, no Qdrant, no corpus, no .env bending: `EMBEDDING_MODE` is pinned before `config` is
+imported, `fastembed` is blocked in `sys.modules`, so a provider that touched ONNX here would fail
+instead of passing, and the ingest checks build their own blank PDF because `data/specs/` is
+gitignored and absent from a clean checkout. What it pins: the mode switch picks the ONNX provider
+and names its own limits, cloud mode sends `models.Document` (and needs `QDRANT_URL` plus the
+client's `cloud_inference` flag), the identity signature is what the guard compares, sparse stays
+client-side crc32 in every mode, and `ensure_collection` stamps that signature at birth.
 """
 import dataclasses
 import os
 import sys
+import tempfile
 import types
 import zlib
 from pathlib import Path
@@ -338,8 +340,17 @@ assert kw["collection_name"] == settings.qdrant_index, kw["collection_name"]
 
 import etsi_mec_agent.ingest as ingest_mod
 
-pdf = root / "data" / "specs" / "MEC001.pdf"
-assert pdf.is_file(), f"{pdf} is needed to reach ingest_pdfs' guard call"
+# data/specs/ is gitignored, so a gate that reads a real PDF cannot run on a clean checkout. Neither
+# ingest check below parses the file — one aborts at the identity guard, one at the warm-up — but a
+# blank one-pager keeps that true even if an edit ever lets a run reach ingest_single_pdf: it parses
+# to a single empty page, so the run ends at "No text extracted" instead of inside pymupdf.
+fixture = tempfile.TemporaryDirectory()
+pdf = Path(fixture.name) / "MEC001.pdf"
+pdf.write_bytes(b"%PDF-1.4\n"
+                b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+                b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+                b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n"
+                b"trailer<</Root 1 0 R>>\n")
 
 
 class _Leaky(_FakeClient):
@@ -429,6 +440,26 @@ finally:
     ingest_mod.get_provider, ingest_mod.ensure_collection, ingest_mod.get_qdrant_client = held
 assert order == ["warm"], f"--recreate-index wiped before the embedders proved they load: {order}"
 
+# The same failure without --recreate-index: there is no wipe to precede, so the warm-up is the only
+# thing between a provider that will not load and a batch loop that swallows the error per chunk,
+# prints [SKIPPED] for each one, and exits 0 having indexed nothing. It must still come *after* the
+# identity guard — _guard_fires(_ingest, ...) above proves that by aborting before any embed.
+order.clear()
+held = (ingest_mod.get_provider, ingest_mod.ensure_collection, ingest_mod.get_qdrant_client)
+ingest_mod.get_provider = lambda: _WillNotLoad()
+ingest_mod.ensure_collection = lambda **kw: order.append(("ensure", kw.get("recreate", False)))
+ingest_mod.get_qdrant_client = lambda: _FakeClient(metadata=dict(identity), exists=True)
+try:
+    ingest_mod.ingest_pdfs([pdf])
+    raise AssertionError("an incremental ingest must fail when the provider will not load")
+except RuntimeError as exc:
+    assert "would not load" in str(exc), exc
+finally:
+    ingest_mod.get_provider, ingest_mod.ensure_collection, ingest_mod.get_qdrant_client = held
+assert order == [("ensure", False), "warm"], f"incremental run never warmed the embedders: {order}"
+
+fixture.cleanup()
+
 print("[check] provider seam: EMBEDDING_MODE=local -> OnnxProvider, cached per process,")
 print("[check]   unsupported mode and cloud-without-QDRANT_URL raise ValueError,")
 print("[check]   identity signature complete, query/batch shapes point-ready,")
@@ -441,4 +472,5 @@ print("[check]   label script stamps an unlabeled collection and refuses to over
 print("[check]   a different claim without --force,")
 print("[check]   hybrid nests dense+sparse under RRF and rescores the pool with ColBERT,")
 print("[check]   search_specs and ingest_pdfs both refuse a mismatched collection before")
-print("[check]   embedding, and --recreate-index proves the models load before it wipes — OK")
+print("[check]   embedding, and a recreate and an incremental ingest alike prove the models")
+print("[check]   load before a chunk is at risk — OK")

@@ -358,6 +358,14 @@ def ingest_pdfs(
         verify_collection_identity(client)
     # Dry-run: skip model loading entirely — nothing gets embedded or written.
     provider = None if dry_run else get_provider()
+    if not dry_run and not recreate_index:
+        # An incremental run has no pre-wipe warm-up, and the batch loop below catches every
+        # embedding error: a provider that cannot construct would be retried per chunk, each chunk
+        # printed [SKIPPED] as if it were oversized, and the command would exit 0 having indexed
+        # nothing. One throwaway embedding makes that failure raise here instead — after the
+        # identity guard (nothing may be embedded into a collection another provider made) and
+        # before any chunk is at risk. --recreate-index already warmed above.
+        provider.embed_dense_batch(["warm the embedders before the batch loop"])
 
     if recreate_index:
         # A wipe empties the collection, so --skip-existing would skip nothing;
