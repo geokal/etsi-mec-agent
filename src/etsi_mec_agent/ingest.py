@@ -342,6 +342,13 @@ def ingest_pdfs(
         return 0
 
     if not dry_run:
+        if recreate_index:
+            # Fail before the wipe, not after: the ONNX models construct lazily on first use, so a
+            # missing package or a failed model download used to surface inside the first batch's
+            # except, by which point --recreate-index had already emptied the collection. One
+            # throwaway embedding forces both constructions (get_embedders builds dense and
+            # ColBERT together); in cloud mode it returns a Document and touches no network.
+            get_provider().embed_dense_batch(["warm the embedders before recreating the collection"])
         ensure_collection(recreate=recreate_index)
     client = get_qdrant_client()
     if not dry_run:

@@ -23,12 +23,15 @@ Full record, including what the numbers cannot show: **[RESULTS.md](RESULTS.md)*
 | Evidence surviving the 15-excerpt answer budget | 11/16 | **14/16** |
 | Hybrid recall@5 | 10/16 | **14/16** |
 | Union across retrieval paths | 12/16 | **14/16** |
-| Qdrant-side hybrid query (p50, 5,254 chunks) | not measured | **31 ms** |
+| Qdrant-side hybrid query (p50, 5,254 chunks) | not measured | **31 ms** at 200 candidates/leg — the default sends 100 and is unmeasured |
 | Index size | 4,669 word-window chunks | **5,254** row/clause chunks, p90 2 parts/page |
 | Documents the corpus actually held | 106 files, 59 misnamed | **54**, identity read off the cover |
 
 Retrieval quality is benchmarked; answer quality is not, and `n = 16` means one question is six
 points. The chunker trade-off and the two still-missed questions are in RESULTS.md §1 and §7.
+The 7 Nov retrieval figures also predate a harness correction — the eval now filters superseded
+editions, fills the answer pool and stitches page parts exactly as `search_specs` does — so
+re-running the command above can move them; RESULTS.md §1 records the divergence.
 
 ---
 

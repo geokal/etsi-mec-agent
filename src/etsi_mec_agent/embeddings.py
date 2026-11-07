@@ -54,6 +54,7 @@ class OnnxProvider:
     """The local FastEmbed path, verbatim: this is what an unset EMBEDDING_MODE has always done."""
 
     def query_vectors(self, text: str) -> dict:
+        """Raw query vectors: dense and ColBERT as plain lists, sparse as a SparseVector."""
         dense_model, colbert_model = get_embedders()
         return {
             "dense": list(dense_model.embed([text]))[0].tolist(),
@@ -62,10 +63,12 @@ class OnnxProvider:
         }
 
     def embed_dense_batch(self, texts) -> list:
+        """Point-ready dense vectors: float lists that go straight into PointStruct.vector."""
         dense_model, _ = get_embedders()
         return [v.tolist() for v in dense_model.embed(texts)]
 
     def embed_colbert_batch(self, texts) -> list:
+        """Point-ready ColBERT multivectors: one list of per-token vectors per text."""
         _, colbert_model = get_embedders()
         return [v.tolist() for v in colbert_model.passage_embed(texts)]
 
@@ -75,6 +78,7 @@ class OnnxProvider:
 
 
 def _identity(mode: str) -> dict:
+    """Both providers' signature, read off the same settings so their keys always line up."""
     return {
         "mode": mode,
         "dense_model": settings.dense_model,
@@ -98,6 +102,7 @@ class CloudInferenceProvider:
     """
 
     def query_vectors(self, text: str) -> dict:
+        """Raw query vectors as Documents: the cluster embeds them, sparse stays client-side."""
         return {
             "dense": models.Document(text=text, model=settings.dense_model),
             "colbert": models.Document(text=text, model=settings.colbert_model),
@@ -105,12 +110,15 @@ class CloudInferenceProvider:
         }
 
     def embed_dense_batch(self, texts) -> list:
+        """Point-ready dense Documents: one per text, resolved by the cluster's inference."""
         return [models.Document(text=t, model=settings.dense_model) for t in texts]
 
     def embed_colbert_batch(self, texts) -> list:
+        """Point-ready ColBERT Documents: the multivector is made server-side too."""
         return [models.Document(text=t, model=settings.colbert_model) for t in texts]
 
     def identity(self) -> dict:
+        """The vector-space signature: the same keys as the local provider, mode 'cloud'."""
         return _identity("cloud")
 
 

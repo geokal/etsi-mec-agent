@@ -37,23 +37,31 @@ class _Vec(list):
     """Stands in for a numpy vector: the seam calls .tolist() on the model's output."""
 
     def tolist(self):
-        # Recursive like numpy's: a ColBERT passage is a 2-D array, and ingest stores plain lists.
+        """Recursive like numpy's: a ColBERT passage is a 2-D array, and ingest stores plain lists."""
         return [v.tolist() if isinstance(v, _Vec) else v for v in self]
 
 
 class _FakeDense:
+    """Stands in for fastembed's TextEmbedding at the configured dense width."""
+
     def embed(self, texts):
+        """One dense vector per text, the shape the real embed() yields."""
         return [_Vec([0.1] * settings.dense_dim) for _ in texts]
 
 
 class _FakeColBERT:
+    """Stands in for LateInteractionTextEmbedding at the configured ColBERT width."""
+
     def __init__(self, tokens=4):
+        """tokens is the multivector length every call below returns."""
         self.tokens = tokens
 
     def query_embed(self, text):
+        """One multivector for the query, nested the way the real query_embed nests it."""
         return [_Vec([_Vec([0.0] * settings.colbert_dim) for _ in range(self.tokens)])]
 
     def passage_embed(self, texts):
+        """One multivector per passage."""
         return [_Vec([_Vec([0.0] * settings.colbert_dim) for _ in range(self.tokens)]) for _ in texts]
 
 
@@ -61,6 +69,7 @@ class _FakeClient:
     """Records what the seam asked of Qdrant; never opens a connection."""
 
     def __init__(self, metadata=None, exists=False):
+        """metadata is the identity the collection claims; exists is whether it is there at all."""
         self.metadata = metadata
         self.exists = exists
         self.read_names = []
@@ -68,6 +77,7 @@ class _FakeClient:
         self.updates = []
 
     def get_collection(self, name):
+        """Record the read and hand back a collection carrying the claimed metadata."""
         self.read_names.append(name)
         return types.SimpleNamespace(
             config=types.SimpleNamespace(metadata=self.metadata),
@@ -75,15 +85,19 @@ class _FakeClient:
         )
 
     def collection_exists(self, name):
+        """Answer from the constructor flag: this gate never creates what it did not ask for."""
         return self.exists
 
     def create_collection(self, collection_name, **kwargs):
+        """Record the create call — the metadata stamped at birth is the assertion."""
         self.created.append((collection_name, kwargs))
 
     def create_payload_index(self, **kwargs):
+        """Accept and ignore: payload indexes are not what this gate asserts."""
         pass
 
     def update_collection(self, collection_name, metadata=None, **kwargs):
+        """Record the label write and adopt it, so a second read sees the new claim."""
         self.updates.append((collection_name, metadata))
         self.metadata = metadata
 
@@ -241,6 +255,14 @@ store.get_qdrant_client = lambda: existing
 ensure_collection(collection_name="probe")
 assert existing.created == [], "an existing collection must not be recreated or restamped"
 
+# A raw-vector copy passes the source's claim through: stamping the current provider's would
+# label vectors nobody re-embedded as made by whatever mode happens to be configured.
+copied_from = dict(identity, dense_model="elsewhere/bge-small-en-v1.5")
+copied = _FakeClient(exists=False)
+store.get_qdrant_client = lambda: copied
+ensure_collection(collection_name="target", metadata=copied_from)
+assert copied.created[0][1]["metadata"] == copied_from, copied.created[0][1]["metadata"]
+
 # --- the label script will not overwrite a different claim -----------------------------------
 
 sys.path.insert(0, str(root / "scripts"))
@@ -266,14 +288,14 @@ def _label(metadata, *argv):
 
 
 client, err = _label({}, "--apply")                     # unlabeled: stamping is the whole point
-assert err is None and client.updates == [("etsi_mec_specs", identity)], (err, client.updates)
+assert err is None and client.updates == [(settings.qdrant_index, identity)], (err, client.updates)
 
 client, err = _label(swapped, "--apply")                # another provider's claim: refuse
 assert err is not None and "--force" in str(err), err
 assert client.updates == [], client.updates
 
 client, err = _label(swapped, "--apply", "--force")     # ...unless the operator vouches for it
-assert err is None and client.updates == [("etsi_mec_specs", identity)], (err, client.updates)
+assert err is None and client.updates == [(settings.qdrant_index, identity)], (err, client.updates)
 
 client, err = _label(swapped)                           # dry run reports and writes nothing
 assert err is None and client.updates == [], (err, client.updates)
@@ -284,10 +306,14 @@ from etsi_mec_agent import search as search_mod
 
 
 class _QueryCapture:
+    """Records the hybrid query_points request so its nesting and budget are assertable."""
+
     def __init__(self):
+        """Start with no request recorded."""
         self.kwargs = None
 
     def query_points(self, **kwargs):
+        """Keep the request and return no points: only its shape matters here."""
         self.kwargs = kwargs
         return types.SimpleNamespace(points=[])
 
@@ -308,13 +334,111 @@ assert inner.limit == kw["limit"] == 30, (inner.limit, kw["limit"])
 assert kw["using"] == "colbert" and kw["query"] == colbert_q, (kw["using"], kw["query"])
 assert kw["collection_name"] == settings.qdrant_index, kw["collection_name"]
 
+# --- the entry points enforce the guard, and --recreate-index fails before it wipes ----------
+
+import etsi_mec_agent.ingest as ingest_mod
+
+pdf = root / "data" / "specs" / "MEC001.pdf"
+assert pdf.is_file(), f"{pdf} is needed to reach ingest_pdfs' guard call"
+
+
+class _Leaky(_FakeClient):
+    """An existing collection whose vectors another provider made, and that records traffic."""
+
+    def __init__(self, metadata):
+        """metadata is the foreign claim; queried/upserted record any traffic past the guard."""
+        super().__init__(metadata=metadata, exists=True)
+        self.queried = []
+        self.upserted = []
+
+    def query_points(self, **kwargs):
+        """Record a query that must never happen past the guard."""
+        self.queried.append(kwargs)
+        return types.SimpleNamespace(points=[])
+
+    def upsert(self, **kwargs):
+        """Record a write that must never happen past the guard."""
+        self.upserted.append(kwargs)
+
+
+def _guard_fires(run, label):
+    """`run` must abort with the guard's RuntimeError before it embeds, queries or upserts.
+
+    Nothing else here would stop it: get_embedders is faked above and the client below records
+    instead of connecting, so an entry point that dropped or delayed its guard runs to completion
+    and scores a collection another provider made. Demanding the guard's own message, then an empty
+    traffic record, is what pins the abort to the guard.
+    """
+    leaky = _Leaky(dict(identity, dense_model="Qdrant/bm25"))
+    try:
+        run(leaky)
+        raise AssertionError(f"{label} accepted a collection another provider made")
+    except RuntimeError as exc:
+        assert "dense_model" in str(exc), exc
+    assert leaky.queried == [] and leaky.upserted == [], (label, leaky.queried, leaky.upserted)
+
+
+def _search(leaky):
+    """search_specs pointed at a collection the current provider did not make."""
+    held = search_mod.get_qdrant_client
+    search_mod.get_qdrant_client = lambda: leaky
+    try:
+        search_mod.search_specs("Mp1 reference point", top_k=5, use_bm25=True)
+    finally:
+        search_mod.get_qdrant_client = held
+
+
+def _ingest(leaky):
+    """ingest_pdfs without --recreate-index, pointed at the same mismatched collection."""
+    held = (ingest_mod.get_qdrant_client, ingest_mod.ensure_collection)
+    ingest_mod.get_qdrant_client = lambda: leaky
+    ingest_mod.ensure_collection = lambda **kw: None
+    try:
+        ingest_mod.ingest_pdfs([pdf])
+    finally:
+        ingest_mod.get_qdrant_client, ingest_mod.ensure_collection = held
+
+
+_guard_fires(_search, "search_specs")
+_guard_fires(_ingest, "ingest_pdfs")
+
+# The warm-up must precede the wipe: the ONNX models construct lazily, so a load failure used to
+# surface inside the first batch's except with the collection already emptied by --recreate-index.
+order = []
+
+
+class _WillNotLoad:
+    """A provider whose model construction fails, after recording that it was asked."""
+
+    def embed_dense_batch(self, texts):
+        """Record the warm-up call, then fail the way a missing ONNX model does."""
+        order.append("warm")
+        raise RuntimeError("the model would not load")
+
+
+held = (ingest_mod.get_provider, ingest_mod.ensure_collection, ingest_mod.get_qdrant_client)
+ingest_mod.get_provider = lambda: _WillNotLoad()
+ingest_mod.ensure_collection = lambda **kw: order.append("recreate")
+ingest_mod.get_qdrant_client = lambda: _FakeClient(metadata=dict(identity), exists=True)
+try:
+    ingest_mod.ingest_pdfs([pdf], recreate_index=True)
+    raise AssertionError("a model that will not load must stop the ingest")
+except RuntimeError as exc:
+    assert "would not load" in str(exc), exc
+finally:
+    ingest_mod.get_provider, ingest_mod.ensure_collection, ingest_mod.get_qdrant_client = held
+assert order == ["warm"], f"--recreate-index wiped before the embedders proved they load: {order}"
+
 print("[check] provider seam: EMBEDDING_MODE=local -> OnnxProvider, cached per process,")
 print("[check]   unsupported mode and cloud-without-QDRANT_URL raise ValueError,")
 print("[check]   identity signature complete, query/batch shapes point-ready,")
 print("[check]   cloud -> Documents carrying the configured ids + cloud_inference=True client,")
 print("[check]   sparse stays client-side crc32 in both modes,")
 print("[check]   guard silent on match + names the swapped key and the label script otherwise,")
-print("[check]   ensure_collection stamps metadata at birth and never restamps,")
+print("[check]   ensure_collection stamps metadata at birth, never restamps, and honours a")
+print("[check]   copied source's claim instead of the current provider's,")
 print("[check]   label script stamps an unlabeled collection and refuses to overwrite")
 print("[check]   a different claim without --force,")
-print("[check]   hybrid nests dense+sparse under RRF and rescores the pool with ColBERT — OK")
+print("[check]   hybrid nests dense+sparse under RRF and rescores the pool with ColBERT,")
+print("[check]   search_specs and ingest_pdfs both refuse a mismatched collection before")
+print("[check]   embedding, and --recreate-index proves the models load before it wipes — OK")

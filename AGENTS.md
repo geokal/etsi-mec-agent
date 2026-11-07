@@ -74,7 +74,9 @@ scripts/
   #                            # and --force is needed to overwrite a different identity claim
   eval_rag.py               # golden-question recall@k, both paths + the --answer budget
   migrate_add_sparse.py     # copy points into a new collection that has 'sparse' (no re-embed);
-  #                         # resolves the alias and refuses an existing --target rather than clobbering it
+  #                         # resolves the alias, refuses an existing --target rather than clobbering
+  #                         # it, and refuses a source that records no embedding identity (a copy
+  #                         # inherits the SOURCE's claim, never the current provider's)
   graph_visualize.py        # force-directed spec relationship graph
 
 data/

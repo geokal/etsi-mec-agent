@@ -28,6 +28,7 @@ from migrate_add_sparse import resolve_collection
 
 
 def main():
+    """Report a collection's identity claim; --apply writes it, --force overwrites one."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--collection", default=settings.qdrant_index,
                         help=f"collection or alias to label (default: {settings.qdrant_index})")

@@ -51,6 +51,7 @@ def _embed_text(payload: dict) -> str:
 
 
 def main():
+    """Copy every point into a collection that declares 'sparse', then move the alias onto it."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--target", default=NEW,
                         help=f"collection to copy into (default: {NEW})")
@@ -69,8 +70,19 @@ def main():
     if target == source:
         raise SystemExit(f"ABORT: --target '{target}' is the collection being migrated")
 
-    src = client.get_collection(source).points_count
-    ensure_collection(collection_name=target)
+    src_col = client.get_collection(source)
+    # A copy carries the vectors it copies, so the target inherits the SOURCE's identity claim:
+    # stamping the current provider's would label local vectors as cloud-made (or the reverse)
+    # and wave through exactly the mismatch the guard exists to catch.
+    source_identity = src_col.config.metadata
+    if not source_identity:
+        raise SystemExit(
+            f"ABORT: '{source}' records no embedding identity, so nothing can say which provider "
+            f"made the vectors about to be copied. Label it first — "
+            f"`uv run python scripts/label_collection_identity.py --apply` with QDRANT_INDEX "
+            f"pointed at '{source}' — then re-run.")
+    ensure_collection(collection_name=target, metadata=source_identity)
+    src = src_col.points_count
 
     copied = 0
     offset = None

@@ -16,6 +16,14 @@ repository, it says so. Single author, 26 Sep – 11 Oct 2026.
 | 2026-10-11 (§5i) | 11 | 12 | **14** | 15 | review-round fixes — identical, i.e. rank-neutral |
 | 2026-11-07 (c183eb2) | 11 | **14** | **14** | 14 | RRF pool rescored by ColBERT MaxSim (nested prefetch-fuse-rerank) |
 
+**No row above is reproducible with today's `eval_rag.py`.** Until 2026-11-07 the hybrid and
+aggregate columns queried *without* `build_filter()`, so superseded editions were scoreable while
+the ColBERT column was not; the aggregate column fetched a flat 100 candidates per leg instead of
+the `--answer-context`-derived 180; and neither top-5 column stitched page parts before dedup the
+way `search_specs` does. Each divergence moves recall in a direction nobody measured, so the rows
+above are a faithful record of what those runs printed and **not** measurements of the shipped
+path. Re-measurement under the corrected harness is pending.
+
 `aggregate@15` counts the questions whose evidence survives the 15-excerpt budget that is actually
 handed to the LLM — the metric that decides answer quality, unlike recall@5. Net movement:
 **11/16 → 14/16 (+27%)**, union 12/16 → 15/16.
@@ -71,10 +79,16 @@ timed client-side:
 |---|---|---|---|---|---|
 | 2026-10-11 | two prefetches + RRF, per-leg 50, 15 points | 15.3 ms | 31.3 ms | 9.2 ms | 290.6 ms (cold) |
 | 2026-11-07 | same legs + ColBERT MaxSim rescore, 15 points | 27.1 ms | 70.8 ms | 12.5 ms | 174.3 ms |
-| 2026-11-07 | shipped `--top-k 5` shape: per-leg 200, pool 30, + rescore | 31.0 ms | 38.6 ms | 11.0 ms | 50.1 ms |
+| 2026-11-07 | **non-default** shape: per-leg 200, pool 30, + rescore | 31.0 ms | 38.6 ms | 11.0 ms | 50.1 ms |
 
 The rescore pass is the delta between the first two rows — roughly +12 ms p50 at identical leg
 limits.
+
+The third row is **not** what the shipped default sends. `--use-bm25 --top-k 5` without `--answer`
+asks for 100 candidates per leg (`max(prefetch_limit * 4, 100)`, `search.py:514`) into a 30-point
+pool (`fetch_k * 6`, `search.py:513`); the probe ran 200 per leg, so that p50 belongs to a larger
+request than the default. The default shape is unmeasured, and no probe script is committed — all
+three rows are records of runs that happened, not reproducible benchmarks.
 
 This is Qdrant-side only. It excludes the ONNX embedding of the query text and the LLM round-trip,
 so it is not an end-to-end latency claim — the honest statement is "retrieval is tens of

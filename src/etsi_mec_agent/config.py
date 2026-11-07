@@ -7,6 +7,8 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class Settings:
+    """The whole runtime configuration: every field is env-backed and resolved once at import."""
+
     # Qdrant connection
     qdrant_host: str = os.getenv("QDRANT_HOST", "localhost")
     qdrant_port: int = int(os.getenv("QDRANT_PORT", "6333"))

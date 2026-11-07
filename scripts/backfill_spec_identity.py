@@ -156,7 +156,7 @@ def verify() -> None:
     search.get_provider = lambda: types.SimpleNamespace(
         query_vectors=lambda t: {
             "dense": [0.1] * settings.dense_dim,
-            "colbert": [[0.1] * 128 for _ in range(4)],
+            "colbert": [[0.1] * settings.colbert_dim for _ in range(4)],
             "sparse": embeddings._token_sparse(t),
         }
     )
@@ -170,6 +170,7 @@ def verify() -> None:
     qv = search.get_provider().query_vectors(query)
 
     def pool(current_only: bool) -> list:
+        """The hybrid pool under one filter setting, so both settings see the same query."""
         return search._run_hybrid_retrieval(
             client, qv["dense"], qv["sparse"], qv["colbert"],
             top_k=60, prefetch_limit=100,

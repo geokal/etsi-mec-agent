@@ -42,16 +42,22 @@ def verify_collection_identity(client=None, collection_name: str | None = None):
         raise RuntimeError(f"collection {name!r}: {problem}")
 
 
-def ensure_collection(recreate: bool = False, collection_name: str | None = None):
+def ensure_collection(recreate: bool = False, collection_name: str | None = None,
+                      metadata: dict | None = None):
     """
     Initialize the Qdrant hybrid collection with:
-    - 'dense': standard 384-d Cosine vectors for fast candidate filtering
-    - 'colbert': 128-d multi-vectors with MaxSim comparator for token-level table matching
+    - 'dense': Cosine vectors, `settings.dense_dim` wide, for fast candidate filtering
+    - 'colbert': MaxSim multi-vectors, `settings.colbert_dim` wide per token, for table matching
     - 'sparse': raw term frequencies, IDF weighting applied server-side (Modifier.IDF)
 
     collection_name overrides settings.qdrant_index (used by the sparse migration).
+    metadata overrides the identity stamped at birth: a raw-vector copy passes the source's claim
+    through, because the vectors it carries were not made by the current provider.
     """
     name = collection_name or settings.qdrant_index
+    # Resolved before the delete below. Constructing the provider can fail (EMBEDDING_MODE=cloud
+    # without QDRANT_URL), and failing after the wipe would leave an empty collection behind.
+    identity = metadata if metadata is not None else get_provider().identity()
     client = get_qdrant_client()
     exists = client.collection_exists(name)
 
@@ -83,7 +89,7 @@ def ensure_collection(recreate: bool = False, collection_name: str | None = None
             },
             # Self-describing at birth: the guard below compares this against the current
             # provider before any query, so a model swap without re-ingest aborts loudly.
-            metadata=get_provider().identity(),
+            metadata=identity,
         )
         client.create_payload_index(
             collection_name=name,

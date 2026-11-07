@@ -72,9 +72,9 @@ def _run_hybrid_retrieval(
             query=models.FusionQuery(fusion=models.Fusion.RRF),
             limit=top_k,
         ),
-        # ponytail: in cloud mode this is a models.Document and the cluster's late-interaction
-        # inference is unverified (vendor lists ColBERT support console-only); local mode sends
-        # the multivector directly. Same ceiling the non-hybrid rescore path already has.
+        # ponytail: in cloud mode this is a models.Document. The vendor's inference example passes
+        # a ColBERT Document as a query, so late interaction is offered; unexercised is this one as
+        # the rescore over an RRF pool. Ceiling lifts on the first cloud run; local mode is gated.
         query=query_colbert,
         using="colbert",
         limit=top_k,
