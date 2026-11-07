@@ -18,20 +18,23 @@ plain `qdrant_client`, and `QdrantDocumentStore` rejects a collection it did not
 Measured on 16 golden engineering questions; reproduce with `uv run python scripts/eval_rag.py --top-k 5`.
 Full record, including what the numbers cannot show: **[RESULTS.md](RESULTS.md)**.
 
-| | start (26 Sep) | now (7 Nov) |
+| | start (26 Sep) † | now (7 Nov) |
 |---|---|---|
-| Evidence surviving the 15-excerpt answer budget | 11/16 | **14/16** |
-| Hybrid recall@5 | 10/16 | **14/16** |
-| Union across retrieval paths | 12/16 | **14/16** |
+| Evidence surviving the 15-excerpt answer budget | 11/16 † | **12/16** |
+| Hybrid recall@5 | 10/16 † | **12/16** |
+| Union across retrieval paths | 12/16 † | **12/16** |
 | Qdrant-side hybrid query (p50, 5,254 chunks) | not measured | **31 ms** at 200 candidates/leg — the default sends 100 and is unmeasured |
 | Index size | 4,669 word-window chunks | **5,254** row/clause chunks, p90 2 parts/page |
 | Documents the corpus actually held | 106 files, 59 misnamed | **54**, identity read off the cover |
 
+† Every figure before 2026-11-07 was produced by an eval harness that diverged from the shipped
+search path: it did not filter superseded editions, filled a smaller answer pool, and did not stitch
+pages the chunker had split. The 7 Nov column is the first measurement of the path `search_specs`
+actually runs, so **the two columns are not comparable and the flat 12/16 is not a regression** —
+RESULTS.md §1 records the divergence and retracts the deltas that were published from it.
+
 Retrieval quality is benchmarked; answer quality is not, and `n = 16` means one question is six
-points. The chunker trade-off and the two still-missed questions are in RESULTS.md §1 and §7.
-The 7 Nov retrieval figures also predate a harness correction — the eval now filters superseded
-editions, fills the answer pool and stitches page parts exactly as `search_specs` does — so
-re-running the command above can move them; RESULTS.md §1 records the divergence.
+points. The chunker trade-off and the four still-missed questions are in RESULTS.md §1 and §7.
 
 ---
 
