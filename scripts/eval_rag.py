@@ -4,7 +4,7 @@
 
 Exercises three retrieval paths from etsi_mec_agent.search:
   colbert   — dense prefetch + ColBERT MaxSim rescore (search_specs path 2)
-  hybrid    — Qdrant server-side dense+sparse prefetch with RRF fusion (_run_hybrid_retrieval)
+  hybrid    — dense+sparse prefetch fused by RRF, rescored by ColBERT (_run_hybrid_retrieval)
   aggregate — what --answer reads: the hybrid path with contiguous page parts stitched first,
               measured over the same --answer-context / --per-doc budget the CLI uses
               (defaults 15 / 2). This column is the LLM's evidence, not the --top-k printed.
@@ -113,15 +113,17 @@ def hits_colbert(client, q_dense, q_colbert, k):
     return [(doc_key(d.meta), d.content) for d in _dedup_docs(docs, keep=k)]
 
 
-def hits_hybrid(client, q_dense, q_sparse, k):
-    raw = _run_hybrid_retrieval(client, q_dense, q_sparse, top_k=k * 6, prefetch_limit=100)  # defaults from search_specs
+def hits_hybrid(client, q_dense, q_sparse, q_colbert, k):
+    raw = _run_hybrid_retrieval(client, q_dense, q_sparse, q_colbert,
+                                top_k=k * 6, prefetch_limit=100)  # defaults from search_specs
     raw = _dedup_docs(raw, keep=k)  # same post-fusion dedup as search_specs
     return [(doc_key(d.meta), d.content or "") for d in raw]
 
 
-def hits_aggregate(client, q_dense, q_sparse, ctx=15, per_doc=2):
+def hits_aggregate(client, q_dense, q_sparse, q_colbert, ctx=15, per_doc=2):
     """What --answer sees: contiguous page parts stitched, up to per_doc excerpts per doc."""
-    raw = _run_hybrid_retrieval(client, q_dense, q_sparse, top_k=ctx * 6, prefetch_limit=100)
+    raw = _run_hybrid_retrieval(client, q_dense, q_sparse, q_colbert,
+                                top_k=ctx * 6, prefetch_limit=100)
     docs = _dedup_docs(_stitch_parts(raw), keep=ctx, per_doc=per_doc)
     return [(doc_key(d.meta), d.content) for d in docs]
 
@@ -163,8 +165,9 @@ def main():
         q_dense, q_colbert = qv["dense"], qv["colbert"]
 
         r_c = first_hit_rank(hits_colbert(client, q_dense, q_colbert, k), q, k)
-        r_h = first_hit_rank(hits_hybrid(client, q_dense, qv["sparse"], k), q, k)
-        r_a = first_hit_rank(hits_aggregate(client, q_dense, qv["sparse"], ctx=window, per_doc=per_doc), q, window)
+        r_h = first_hit_rank(hits_hybrid(client, q_dense, qv["sparse"], q_colbert, k), q, k)
+        r_a = first_hit_rank(hits_aggregate(client, q_dense, qv["sparse"], q_colbert,
+                                            ctx=window, per_doc=per_doc), q, window)
         modes["colbert"].append(r_c is not None)
         modes["hybrid"].append(r_h is not None)
         agg.append(r_a is not None)

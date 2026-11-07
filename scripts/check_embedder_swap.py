@@ -278,6 +278,36 @@ assert err is None and client.updates == [("etsi_mec_specs", identity)], (err, c
 client, err = _label(swapped)                           # dry run reports and writes nothing
 assert err is None and client.updates == [], (err, client.updates)
 
+# --- the hybrid query nests RRF under a ColBERT rescore -------------------------------------
+
+from etsi_mec_agent import search as search_mod
+
+
+class _QueryCapture:
+    def __init__(self):
+        self.kwargs = None
+
+    def query_points(self, **kwargs):
+        self.kwargs = kwargs
+        return types.SimpleNamespace(points=[])
+
+
+colbert_q = [[0.0] * settings.colbert_dim for _ in range(4)]
+cap = _QueryCapture()
+search_mod._run_hybrid_retrieval(
+    cap, query_dense=[0.0] * settings.dense_dim,
+    query_sparse=models.SparseVector(indices=[1], values=[1.0]),
+    query_colbert=colbert_q, top_k=30, prefetch_limit=100,
+)
+kw = cap.kwargs
+inner = kw["prefetch"]
+assert isinstance(inner, models.Prefetch) and len(inner.prefetch) == 2, inner
+assert {p.using for p in inner.prefetch} == {"dense", "sparse"}, [p.using for p in inner.prefetch]
+assert inner.query == models.FusionQuery(fusion=models.Fusion.RRF), inner.query
+assert inner.limit == kw["limit"] == 30, (inner.limit, kw["limit"])
+assert kw["using"] == "colbert" and kw["query"] == colbert_q, (kw["using"], kw["query"])
+assert kw["collection_name"] == settings.qdrant_index, kw["collection_name"]
+
 print("[check] provider seam: EMBEDDING_MODE=local -> OnnxProvider, cached per process,")
 print("[check]   unsupported mode and cloud-without-QDRANT_URL raise ValueError,")
 print("[check]   identity signature complete, query/batch shapes point-ready,")
@@ -286,4 +316,5 @@ print("[check]   sparse stays client-side crc32 in both modes,")
 print("[check]   guard silent on match + names the swapped key and the label script otherwise,")
 print("[check]   ensure_collection stamps metadata at birth and never restamps,")
 print("[check]   label script stamps an unlabeled collection and refuses to overwrite")
-print("[check]   a different claim without --force — OK")
+print("[check]   a different claim without --force,")
+print("[check]   hybrid nests dense+sparse under RRF and rescores the pool with ColBERT — OK")

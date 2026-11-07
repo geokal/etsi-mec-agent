@@ -38,6 +38,7 @@ def _run_hybrid_retrieval(
     client,
     query_dense: list,
     query_sparse,
+    query_colbert: list,
     top_k: int = 5,
     prefetch_limit: int = 50,
     query_filter=None,
@@ -47,25 +48,35 @@ def _run_hybrid_retrieval(
 
     Two prefetches — dense (semantic recall) and sparse BM25-style term
     frequencies (exact identifiers like "Mm4", "Mp1", clause numbers) —
-    fused with RRF inside Qdrant. The collection declares Modifier.IDF on
-    the sparse vector, so rarity is computed corpus-wide instead of the
-    old per-candidate approximation.
+    fused with RRF inside Qdrant, and the fused pool rescored by the ColBERT
+    multivector as the outer query: recall from both legs, ordering from
+    late interaction. The collection declares Modifier.IDF on the sparse
+    vector, so rarity is computed corpus-wide instead of the old
+    per-candidate approximation.
 
     Returns up to top_k SimpleDocs — .content is the stored payload text, .meta is the
     payload — the shape generate_answer() and _dedup_docs read.
     """
     results = client.query_points(
         collection_name=settings.qdrant_index,
-        prefetch=[
-            models.Prefetch(
-                query=query_dense, using="dense", limit=prefetch_limit, filter=query_filter
-            ),
-            models.Prefetch(
-                query=query_sparse, using="sparse",
-                limit=prefetch_limit, filter=query_filter,
-            ),
-        ],
-        query=models.FusionQuery(fusion=models.Fusion.RRF),
+        prefetch=models.Prefetch(
+            prefetch=[
+                models.Prefetch(
+                    query=query_dense, using="dense", limit=prefetch_limit, filter=query_filter
+                ),
+                models.Prefetch(
+                    query=query_sparse, using="sparse",
+                    limit=prefetch_limit, filter=query_filter,
+                ),
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            limit=top_k,
+        ),
+        # ponytail: in cloud mode this is a models.Document and the cluster's late-interaction
+        # inference is unverified (vendor lists ColBERT support console-only); local mode sends
+        # the multivector directly. Same ceiling the non-hybrid rescore path already has.
+        query=query_colbert,
+        using="colbert",
         limit=top_k,
         query_filter=query_filter,
     )
@@ -442,8 +453,8 @@ def search_specs(
     retrieval widens to `max(top_k, answer_context)` so the evidence budget can fill.
 
     * Without --use-bm25    : dense prefetch + ColBERT MaxSim rescore, then stitch and dedup.
-    * With    --use-bm25    : Qdrant server-side dense+sparse hybrid fused by RRF, then the
-                              same stitch and dedup.
+    * With    --use-bm25    : dense+sparse prefetch fused by RRF inside Qdrant, that pool
+                              rescored by ColBERT MaxSim, then the same stitch and dedup.
     * With    --answer      : feeds the `answer_context` excerpts to the OpenRouter LLM.
     * With    --show-reasoning : also prints the model's reasoning_details thinking chain.
     * By    --all-editions    : keep chunks stamped is_current=false; by default a superseded
@@ -492,12 +503,13 @@ def search_specs(
     # 1️⃣  Hybrid retrieval (dense + sparse prefetch, fused server-side by RRF)
     # ------------------------------------------------------------------
     if use_bm25:
-        print(f"\n[QUERY] '{query_text}' [HYBRID: Dense + sparse prefetch → server-side RRF]"
-              f"{filter_info}")
+        print(f"\n[QUERY] '{query_text}' [HYBRID: Dense + sparse prefetch → server-side RRF"
+              f" → ColBERT rescore]{filter_info}")
         hybrid_hits = _run_hybrid_retrieval(
             client=client,
             query_dense=query_dense,
             query_sparse=qv["sparse"],
+            query_colbert=query_colbert,
             top_k=fetch_k * 6,        # fetch 6× more so dedup still fills the evidence budget
             prefetch_limit=max(prefetch_limit * 4, 100),
             query_filter=query_filter,
@@ -508,7 +520,7 @@ def search_specs(
             print("No matching documents found.")
             if full_result:
                 return {"display": [], "answer_docs": [], "info": {
-                    "path": "Hybrid RRF (dense + sparse, fused server-side in Qdrant)",
+                    "path": "Hybrid RRF (dense + sparse fused server-side) → ColBERT rescore",
                     "elapsed_ms": (time.time() - t0) * 1000, "fetched": 0, "stitched": 0, "shown": 0,
                     "filter_info": filter_info.strip(), "merged_groups": 0, "answer_words": 0}}
             return []
@@ -549,7 +561,7 @@ def search_specs(
             generate_answer(query_text, answer_docs, stream=stream, show_reasoning=show_reasoning)
         if full_result:
             return {"display": unique_docs, "answer_docs": answer_docs, "info": {
-                "path": "Hybrid RRF (dense + sparse, fused server-side in Qdrant)",
+                "path": "Hybrid RRF (dense + sparse fused server-side) → ColBERT rescore",
                 "elapsed_ms": (time.time() - t0) * 1000,
                 "fetched": len(hybrid_hits),
                 "stitched": len(stitched), "shown": len(unique_docs),

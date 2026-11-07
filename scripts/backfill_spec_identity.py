@@ -136,8 +136,11 @@ def verify() -> None:
     """Assert search_specs() itself drops superseded editions, with the embedders stubbed.
 
     fastembed is replaced before etsi_mec_agent.search is imported, so this runs against the
-    live collection without loading ONNX; the vectors are arbitrary because the assert is
-    about which chunks a filtered query can return, not about their rank.
+    live collection without loading ONNX. The stub's ColBERT vector must be non-degenerate:
+    the hybrid path rescores with it, and an all-zero multivector ties every MaxSim score,
+    leaving the pool order up to the server's tie-break. Reachability is therefore asserted
+    on the fused pool (_run_hybrid_retrieval), not on the shaped top-k display, so it cannot
+    depend on where an arbitrary rescore ranks a superseded chunk.
     """
     import sys
     import types
@@ -153,21 +156,32 @@ def verify() -> None:
     search.get_provider = lambda: types.SimpleNamespace(
         query_vectors=lambda t: {
             "dense": [0.1] * settings.dense_dim,
-            "colbert": [[0.0] * 128 for _ in range(4)],
+            "colbert": [[0.1] * 128 for _ in range(4)],
             "sparse": embeddings._token_sparse(t),
         }
     )
 
-    docs = search.search_specs("reference point MEC platform orchestrator", top_k=5, use_bm25=True)
+    query = "reference point MEC platform orchestrator"
+    docs = search.search_specs(query, top_k=5, use_bm25=True)
     leaked = [d.meta.get("doc_id") for d in docs if (d.meta or {}).get("is_current") is False]
     assert not leaked, f"current_only leaked superseded editions: {leaked}"
 
-    all_editions = search.search_specs("reference point MEC platform orchestrator",
-                                       top_k=5, use_bm25=True, current_only=False)
-    stale = [d.meta.get("doc_id") for d in all_editions if (d.meta or {}).get("is_current") is False]
+    client = search.get_qdrant_client()
+    qv = search.get_provider().query_vectors(query)
+
+    def pool(current_only: bool) -> list:
+        return search._run_hybrid_retrieval(
+            client, qv["dense"], qv["sparse"], qv["colbert"],
+            top_k=60, prefetch_limit=100,
+            query_filter=search.build_filter(current_only=current_only),
+        )
+
+    leaked = [d.meta.get("doc_id") for d in pool(True) if d.meta.get("is_current") is False]
+    assert not leaked, f"the filtered hybrid pool leaked superseded editions: {leaked}"
+    stale = [d.meta.get("doc_id") for d in pool(False) if d.meta.get("is_current") is False]
     assert stale, "the same query must reach a superseded edition once the filter is off"
-    print(f"\n[verify] filtered {len(docs)} excerpts, none superseded; --all-editions returns "
-          f"{len(stale)} of them: {stale}")
+    print(f"\n[verify] filtered {len(docs)} excerpts, none superseded; the unfiltered pool "
+          f"reaches {len(stale)} of them: {sorted(set(stale))}")
 
 
 def main() -> None:
