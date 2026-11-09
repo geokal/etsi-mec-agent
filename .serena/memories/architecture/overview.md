@@ -158,6 +158,11 @@ data/
   are provably retrieval failures, not ranking ones. The cutover is **done** (`rename_alias` is rejected
   by 1.19.1; one atomic create+delete+create moved the alias), and 52 duplicate PDFs were dropped from
   `data/specs` with no stored chunk orphaned.
+  **Superseded 2026-11-07**: every number in this bullet came from an `eval_rag.py` that did not send
+  `build_filter()`, under-filled the aggregate pool and did not stitch split pages — it was not
+  measuring `search_specs`. The corrected harness gives colbert 11 / hybrid 12 / aggregate@15 12, union
+  12/16; q08 is @1 in both top-5 columns and misses only the answer budget, q14 reaches that budget at
+  @7. Do not quote the old figures. `RESULTS.md` §1 is the record.
 - **Citation grounding**: `search.py::_source_label` / `_build_context` / `_ungrounded_citations` +
   `[ANSWER SOURCES]`, checked by `scripts/check_answer_grounding.py` with `openai` faked. Whether the
   audit finds drift in live answers is an `--answer` run away.

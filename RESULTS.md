@@ -1,7 +1,7 @@
 # Measured results
 
 Every number below has a date and a command. Where a number cannot be reproduced from this
-repository, it says so. Single author, 26 Sep – 11 Oct 2026.
+repository, it says so. Single author, 26 Sep – 7 Nov 2026.
 
 ## 1. Retrieval quality — 16 golden engineering questions
 
@@ -14,10 +14,75 @@ repository, it says so. Single author, 26 Sep – 11 Oct 2026.
 | 2026-10-06 (§5d) | 11 | 11 | 12 | — | cover-derived identity, edition filtering, `content_md5` quota |
 | 2026-10-08 (§5e) | 11 | 12 | **14** | 15 | row-/clause-aware chunking with the clause floor |
 | 2026-10-11 (§5i) | 11 | 12 | **14** | 15 | review-round fixes — identical, i.e. rank-neutral |
+| 2026-11-07 (c183eb2) | 11 | **14** | **14** | 14 | RRF pool rescored by ColBERT MaxSim (nested prefetch-fuse-rerank) |
+| 2026-11-07 (9d7bae7) | 11 | **12** | **12** | 12 | corrected harness — **not comparable to any row above it** |
 
-`aggregate@15` counts the questions whose evidence survives the 15-excerpt budget that is actually
-handed to the LLM — the metric that decides answer quality, unlike recall@5. Net movement:
-**11/16 → 14/16 (+27%)**, union 12/16 → 15/16.
+`union` is the two top-5 paths (colbert@5 ∪ hybrid@5), not all three columns.
+
+**Only the last row is reproducible with today's `eval_rag.py`.** Until 2026-11-07 the hybrid and
+aggregate columns queried *without* `build_filter()`, so superseded editions were scoreable while the
+ColBERT column was not; the aggregate column fetched a flat 100 candidates per leg instead of the
+`--answer-context`-derived 180; and neither top-5 column stitched page parts before dedup the way
+`search_specs` does. Every row above the last was printed by that harness, so those numbers are a
+faithful record of what the runs printed and **not** measurements of the shipped path.
+
+What the correction cost, per question, against the c183eb2 run:
+
+- **The ColBERT column is unchanged, rank for rank (11/16).** Its only change was the stitch, so on
+  this corpus stitching is rank-neutral **in that column**: it merges page parts into richer excerpts
+  without moving any document into or out of the top 5. That is not transferable to the hybrid column,
+  whose stitch runs over a fused pool rather than a ColBERT-ranked one.
+- **Hybrid lost exactly two questions, q02 and q14 (14 → 12); the filter is the leading candidate,
+  not a proven one.** That column gained the filter *and* the stitch at once, so this run cannot rule
+  the stitch out. The corpus supports the filter reading: `Mm3` (q02) occurs in **5 superseded**
+  MEC-003 chunks against 3 current ones, and q14's keywords in **53 superseded** chunks against 23
+  current. On that mechanism the old column was crediting retrievals from editions `search_specs`
+  refuses to return — the drop would be the measurement becoming honest, not the retriever getting
+  worse. Isolating it needs a filter-only ablation nobody has run.
+- **Aggregate moved 14 → 12, and that delta is *not* attributable.** Two changes hit this column at
+  once (the filter, and the pool going 100 → 180 per leg); it gained q05 and lost q08, q09 and q13.
+  Separating them needs an ablation nobody has run.
+- **The three aggregate losses are a cross-invocation effect, not a shipped-path defect.** q08, q09
+  and q13 sit at **@1 in both top-5 columns** and miss the 15-excerpt aggregate column — but those are
+  **separate eval invocations**: the top-5 columns fetch 100 candidates per leg (`eval_rag.py:125`),
+  the aggregate column 180 (`:139`). Inside one real `--answer --use-bm25` run `search_specs` builds
+  the printed list and the LLM's evidence from the *same* stitched hits (`search.py:528-529`), so a
+  rank-1 excerpt is not discarded there. What the columns do show is that a deeper candidate pool
+  reshuffles which documents fill the 15 slots and `--per-doc 2` spends them across more specs. This
+  was invisible while the column under-filled its pool.
+
+The corrected hybrid column is a superset of the ColBERT column, with q07 the only hybrid-exclusive
+hit, so union is 12/16. The 26 Sep start row (union 12/16) was printed by the old harness, so **no
+delta in the table above is a like-for-like comparison** — there is no corrected-harness baseline for
+the word-window collection. Creating one means re-measuring `etsi_mec_specs_v2` under the corrected
+harness, which needs the identity label first because that collection predates the guard:
+
+    uv run python scripts/label_collection_identity.py --collection etsi_mec_specs_v2 --apply
+    $env:QDRANT_INDEX="etsi_mec_specs_v2"; uv run python scripts/eval_rag.py --top-k 5
+
+`label_collection_identity.py` records the claim you make by running it; it cannot verify the stored
+vectors. `eval_rag.py` has no `--index` flag and reads `QDRANT_INDEX`, so both commands must run in
+the same shell.
+
+`aggregate@15` counts the questions whose evidence survives the 15-excerpt budget that
+`--answer --use-bm25` hands to the LLM — the metric that decides answer quality, unlike recall@5.
+Bare `--answer` takes the dense/ColBERT path instead (`search.py:505` gates the hybrid on `use_bm25`),
+which this column does not measure.
+
+Two claims previously recorded here are retracted by the corrected run: net movement
+**11/16 → 14/16 (+27%)** with union 12/16 → 15/16, and the rescore's own effect (hybrid@5 12→14,
+union 15→14, q12 leaving the hybrid top-5 while still reaching the LLM at @4). Both were old-harness
+numbers. Under the corrected harness hybrid@5 is 12, union is 12, and q12 reaches the answer budget
+at @3.
+
+That also removes the nested ColBERT rescore's only recorded justification — but not for the reason
+first written here. The **+2 hybrid@5 (12→14) credited in c183eb2 was measured inside the old
+*unfiltered* harness on both sides** (`eval_rag.py` at d7b229b passes no `query_filter` to either
+hybrid leg), so the filter changed in neither run and cannot explain it. The corrected row measures
+rescored *and* filtered at 12, with no corrected un-rescored comparator: the rescore's recall effect
+is **unknown**, not zero and not negative. Establishing it needs an A/B against the un-rescored shape
+under the corrected harness, which has not been run. What survives from those paragraphs is the
+reading rule, not the values: n = 16, so ±1 or ±2 is a one-question swing, not a trend.
 
 The limits of that number, stated before someone finds them: **n = 16**, so one question is 6
 points. Three goldens were rewritten mid-project because they were unanswerable as written (q12's
@@ -28,6 +93,10 @@ under the new yardstick so the comparison would mean something:
 |---|---|---|---|---|
 | word-window chunks, 4,669 | 12 | 12 | 14 | 16/16 |
 | row/clause chunks, 5,254 | 11 | 12 | 14 | 15/16 |
+
+Both rows are old-harness (2026-10-08): unfiltered hybrid/aggregate, a 100-per-leg answer pool, no
+stitch in the top-5 columns. They still answer the question they were run for — the two collections
+under one yardstick on one day — but neither number is comparable to the corrected row above.
 
 Aggregate is tied. The row/clause chunker was chosen anyway because a table row split across two
 chunks produces an answer with a cut cell, which recall cannot see — that is a correctness property
@@ -57,10 +126,24 @@ Corpus defects found and fixed, which is most of what the work was:
 
 ## 3. Retrieval latency
 
-25 hybrid queries against the live collection (two prefetches + RRF fusion, `is_current` filter,
-15 points with payload returned), random 384-d dense vector + 24-term sparse, timed client-side:
+25 hybrid queries against the live collection (`is_current` filter, payload returned), random
+384-d dense vector + 24-term sparse (+ a random 4×128 ColBERT multivector once the rescore existed),
+timed client-side:
 
-**p50 15.3 ms · p95 31.3 ms · min 9.2 ms · max 290.6 ms** (the max is the first query, cold).
+| Measured | shape | p50 | p95 | min | max |
+|---|---|---|---|---|---|
+| 2026-10-11 | two prefetches + RRF, per-leg 50, 15 points | 15.3 ms | 31.3 ms | 9.2 ms | 290.6 ms (cold) |
+| 2026-11-07 | same legs + ColBERT MaxSim rescore, 15 points | 27.1 ms | 70.8 ms | 12.5 ms | 174.3 ms |
+| 2026-11-07 | **non-default** shape: per-leg 200, pool 30, + rescore | 31.0 ms | 38.6 ms | 11.0 ms | 50.1 ms |
+
+The rescore pass is the delta between the first two rows — roughly +12 ms p50 at identical leg
+limits.
+
+The third row is **not** what the shipped default sends. `--use-bm25 --top-k 5` without `--answer`
+asks for 100 candidates per leg (`max(prefetch_limit * 4, 100)`, `search.py:514`) into a 30-point
+pool (`fetch_k * 6`, `search.py:513`); the probe ran 200 per leg, so that p50 belongs to a larger
+request than the default. The default shape is unmeasured, and no probe script is committed — all
+three rows are records of runs that happened, not reproducible benchmarks.
 
 This is Qdrant-side only. It excludes the ONNX embedding of the query text and the LLM round-trip,
 so it is not an end-to-end latency claim — the honest statement is "retrieval is tens of
@@ -84,28 +167,45 @@ milliseconds", not "sub-second".
 
 ## 5. Verification
 
-No test framework and no fixtures — 7 runnable checks, **169 assertions**, that import the
+No test framework and no fixtures — 9 runnable checks, **305 assertions**, that import the
 **production** symbols with `fastembed` stubbed, so they run in seconds on a 16 GB CPU host
 without loading a model:
 
 | Check | Assertions | Guards |
 |---|---|---|
+| `check_embedder_swap.py` | 67 | the provider seam, the identity guard at all three entry points, the warm-up that fails a recreate *or* an incremental ingest before the batch loop can swallow it, the cloud recreate preflight that probes **both** models through a throwaway collection and cleans it up, the migration's inherited identity |
+| `check_answer_grounding.py` | 55 | excerpt labels, citation audit, `generate_answer` wiring with `openai` faked |
 | `check_dedup_stitch.py` | 53 | stitching, per-doc quota, whole-text fingerprint |
-| `check_answer_grounding.py` | 48 | excerpt labels, citation audit, `generate_answer` wiring with `openai` faked |
+| `check_app_ui.py` | 42 | the Streamlit screens, password gate and citation rendering |
 | `check_chunking.py` | 23 | rows never cut, headers repeated, clause floor, empty-window and furniture filters |
 | `check_download_naming.py` | 20 | cover naming, edition in name, duplicate refusal, dedupe keepers, unreadable body, URL-vs-cover disagreement |
+| `check_eval_golden.py` | 17 | every golden answerable from the live collection; the eval's request shape, stitch order and guard |
+| `check_migrate_sparse.py` | 17 | migration rebuilds each sparse vector with the cover identity ingest prefixes; a source whose stored vector widths differ from the configured target aborts **before** that target is created |
 | `check_diagram_filter.py` | 11 | blank/tiny/duplicate images, per-document dedup |
-| `check_migrate_sparse.py` | 8 | migration rebuilds each sparse vector with the cover identity ingest prefixes |
-| `check_eval_golden.py` | 6 | every golden answerable from the live collection |
 
-    for s in chunking dedup_stitch diagram_filter download_naming answer_grounding migrate_sparse eval_golden; do uv run python scripts/check_$s.py; done
+    status=0; for f in scripts/check_*.py; do uv run python "$f" || status=1; done; exit $status
+
+A bare `for … do … done` exits with the *last* check's status, so a failing check followed by a passing
+one reports success. The accumulator keeps every failure.
+
+Assertion counts are static `assert` statements in each file (some run more than once, some inside
+loops), re-counted on 2026-11-09 the same way as the "296 assertions" figure this replaced (which was
+itself a 2026-11-07 re-count of a wrong "169"). That 169 figure listed 7 of the 9 checks, omitting
+`check_app_ui.py` (added in PR #4) and counting `check_answer_grounding.py` at its pre-2026-10-11 size.
+`check_app_ui.py` and `check_eval_golden.py` read the live collection and need Qdrant running. No
+check reads `data/specs/`, which is gitignored and therefore absent from a clean checkout: the ingest
+checks in `check_embedder_swap.py` write a blank one-page PDF into a temp directory, because both
+abort before anything is parsed.
 
 ## 6. Process
 
-52 of the repository's 56 commits landed on this branch over 16 days (26 Sep – 11 Oct), +4,434/−416
-across 31 files, 4,726 lines of Python in total. A 405-line design
-record (`docs/superpowers/specs/`) with a measured before/after for each change, including the ones
-that did not help. [PR #1](https://github.com/geokal/etsi-mec-agent/pull/1) took 7 findings from an
+52 of the repository's then-56 commits landed on the build branch over 16 days (26 Sep – 11 Oct),
++4,434/−416 across 31 files, 4,726 lines of Python at that date. Measured at `90fd0b5` the repository
+has grown to **86 commits and 6,507 lines of Python**, and the 10 commits on
+`feature/embedding-providers` are +1,218/−155 across 16 files, 12 of them Python (+1,110/−138). A
+405-line design record (`docs/superpowers/specs/`) with a measured before/after for each change,
+including the ones that did not help. [PR #1](https://github.com/geokal/etsi-mec-agent/pull/1) took 7
+findings from an
 automated review: 6 accepted as found, 1 accepted-and-extended with the reason the suggested fix was
 insufficient — and **two of the seven were defects this project had introduced itself** (the 400-char
 dedup fingerprint, the run-wide image-dedup set), which is the more useful signal about how the code
@@ -125,6 +225,51 @@ does. The rebuild now reassembles that prefix from the payload's identity fields
 collection), so this is verified by the model-free check and by reading, not by a run against the
 storage volume.
 
+[PR #5](https://github.com/geokal/etsi-mec-agent/pull/5) — the embedding-provider seam — brought
+findings twelve through twenty: **nine findings, one nitpick and one failed pre-merge check**
+(docstring coverage, 83/83 documented after the round). All nine were verified valid against the live
+code before anything changed and all are fixed in `9d7bae7`. Two
+were defects this PR introduced itself, and both sit in the identity work: `ensure_collection`
+resolved the identity it was about to write *after* it deleted the collection it was recreating, and
+`migrate_add_sparse.py` called it with no way to carry the source's claim, so a copy of a
+local-embedded collection made under `EMBEDDING_MODE=cloud` would have been labelled as something
+its vectors are not. Neither could occur on master, where `ensure_collection` takes no `metadata`
+and records no identity at all. Three more were defects the eval harness has carried since before
+this branch — `hits_hybrid` and `hits_aggregate` never sent `build_filter()`, the aggregate column
+filled its pool with a flat 100 candidates per leg instead of `search_specs`' 180, and neither top-5
+column stitched page parts the way `search.py:517→528` does — confirmed by reading
+`git show master:scripts/eval_rag.py`, so the correction is not a regression this PR introduced. It
+is the reason every recall row in §1 above the 2026-11-07 corrected one is labelled: those numbers
+measured a retriever that saw superseded editions and unstitched pages, which the shipped path does
+not. Two separate review bot instances covered this repository and **disagreed** — only one flagged
+the missing stitch, only one named `eval_rag` as a third guard entry point, only one raised the
+stale RESULTS.md row — so a clean report from one is not a clean diff.
+
+The re-review of `9d7bae7` found two more (findings twenty-one and twenty-two, both fixed in
+`90fd0b5`), and one of them was
+that round's own fix applied only halfway: the warm-up that keeps a model-load failure from being
+swallowed by the per-chunk fallback ran **only** under `--recreate-index`, so an incremental ingest
+against a provider that would not construct still printed one `[SKIPPED]` per chunk and exited 0
+having indexed nothing. Deleting the warm-up reproduces exactly that — the gate now prints
+`[COMPLETED] Indexed 0 chunks` and fails on its own assertion. The other was that
+`check_embedder_swap.py` required `data/specs/MEC001.pdf`, which is gitignored, so the gate could not
+run on a clean checkout at all; it now writes its own blank one-page PDF and passes in a directory
+with no `data/`.
+
+The re-review of `2b10bd5` raised two Majors against the cloud provider, both now fixed. In cloud
+mode `embed_dense_batch` only builds a `models.Document` — the cluster resolves the model on the
+first upsert, which `--recreate-index` has already preceded — so the warm-up above cannot fail and a
+model id the cluster does not serve emptied the collection for nothing. `_preflight_cloud_inference`
+now upserts one point carrying **both** models into `<index>__preflight` and deletes it in a `finally`,
+before the wipe. The incremental path needed no equivalent: `client.upsert` (`ingest.py:319`) sits
+outside the per-batch `try/except` (`:281-300`), so an inference rejection there already propagates
+and exits non-zero. The other Major was `migrate_add_sparse.py` declaring the target from
+`DENSE_DIM`/`COLBERT_DIM` while copying the source's vectors: a width mismatch failed the first
+upsert *after* the target existed, and the script's own "already exists" refusal then blocked every
+retry under that name. It now reads `src_col.config.params.vectors[name].size` — the stored width,
+not the identity claim, which can be wrong — and aborts naming the env var to set. Both fixes are
+mutation-proved in `check_embedder_swap.py` (67) and `check_migrate_sparse.py` (17).
+
 ## 7. What this project does not have
 
 No CI, no containerised app, no packaging. Licensed MIT (2026-10-11) over the code in this
@@ -132,4 +277,11 @@ repository — the ETSI documents themselves are copyrighted by ETSI, are not co
 (`data/specs/` is gitignored), and are fetched by `scripts`/`tools` from ETSI's own server. One
 author, no users, no traffic, no deployment. **Answer quality is not benchmarked — retrieval is**,
 and the LLM is a free-tier router. The `batch_size` 4 → 16 ingest speedup is a code comment, not a
-measurement. q11 and q12 are still missed by at least one path each, with the causes recorded in §5b.
+measurement. As of the corrected-harness run of 2026-11-07, four questions are missed by both top-5
+paths — q02, q12, q14 and q15 — and three of those still reach the 15-excerpt answer budget (q12 at
+@3, q02 at @6, q14 at @7), so the LLM sees evidence the display never shows. q15 reaches nothing on
+any path. The mirror image needs the same qualification: **q08, q09 and q13 rank @1 in both top-5
+columns and MISS the aggregate column**, a `--per-doc 2` / 15-excerpt quota effect at a deeper
+candidate pool. Those columns are separate eval invocations (100 vs 180 per leg), so this is not the
+shipped `--answer` path discarding its own rank-1 evidence — one real run shapes both lists from the
+same stitched hits. The earlier causes are recorded in §5b.
