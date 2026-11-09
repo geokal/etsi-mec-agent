@@ -458,6 +458,72 @@ finally:
     ingest_mod.get_provider, ingest_mod.ensure_collection, ingest_mod.get_qdrant_client = held
 assert order == [("ensure", False), "warm"], f"incremental run never warmed the embedders: {order}"
 
+# --- cloud mode must prove inference before --recreate-index wipes anything ---------------------
+# In cloud mode embed_dense_batch only builds a Document, so the warm-up above cannot fail: the
+# cluster resolves the model on the first upsert, which the wipe has already preceded. A model id
+# the cluster does not serve must abort while the real collection is still intact, must exercise
+# BOTH models, and must not leave the throwaway probe collection behind.
+cloud_order = []
+
+
+class _CloudDocuments:
+    """Batch calls return real Documents without touching the network, as the real provider does."""
+
+    def embed_dense_batch(self, texts):
+        """Record the call and hand back the point-ready value the cluster would resolve."""
+        cloud_order.append("dense")
+        return [models.Document(text=t, model=settings.dense_model) for t in texts]
+
+    def embed_colbert_batch(self, texts):
+        """Record the call and hand back the point-ready value the cluster would resolve."""
+        cloud_order.append("colbert")
+        return [models.Document(text=t, model=settings.colbert_model) for t in texts]
+
+
+class _NoInference(_FakeClient):
+    """A cluster that accepts the probe collection but rejects the point: model not served."""
+
+    def __init__(self):
+        """The real collection exists and claims cloud mode, so the identity guard lets the run past."""
+        super().__init__(metadata=dict(identity, mode="cloud"), exists=True)
+        self.deleted = []
+
+    def upsert(self, **kwargs):
+        """Fail the way an unserved model does, after recording which collection was written."""
+        cloud_order.append(("upsert", kwargs["collection_name"]))
+        raise RuntimeError("model is not available for inference")
+
+    def delete_collection(self, name):
+        """Record the cleanup, so a leaked probe collection is visible."""
+        self.deleted.append(name)
+        cloud_order.append(("delete", name))
+
+
+probe_name = settings.qdrant_index + "__preflight"
+cluster = _NoInference()
+held = (ingest_mod.get_provider, ingest_mod.ensure_collection,
+        ingest_mod.get_qdrant_client, ingest_mod.settings)
+ingest_mod.get_provider = lambda: _CloudDocuments()
+ingest_mod.ensure_collection = lambda **kw: cloud_order.append(
+    ("ensure", kw.get("collection_name"), kw.get("recreate", False)))
+ingest_mod.get_qdrant_client = lambda: cluster
+ingest_mod.settings = _settings(embedding_mode="cloud", qdrant_url="https://example.invalid")
+try:
+    ingest_mod.ingest_pdfs([pdf], recreate_index=True)
+    raise AssertionError("an unserved cloud model must stop the ingest before the wipe")
+except RuntimeError as exc:
+    assert "not available for inference" in str(exc), exc
+finally:
+    (ingest_mod.get_provider, ingest_mod.ensure_collection,
+     ingest_mod.get_qdrant_client, ingest_mod.settings) = held
+    _settings()
+
+assert ("ensure", None, True) not in cloud_order, \
+    f"--recreate-index wiped the real collection before inference was proved: {cloud_order}"
+assert ("upsert", probe_name) in cloud_order, f"the probe never reached the cluster: {cloud_order}"
+assert "colbert" in cloud_order, f"the probe exercised only the dense model: {cloud_order}"
+assert cluster.deleted == [probe_name], f"the probe collection leaked: {cluster.deleted}"
+
 fixture.cleanup()
 
 print("[check] provider seam: EMBEDDING_MODE=local -> OnnxProvider, cached per process,")
@@ -473,4 +539,6 @@ print("[check]   a different claim without --force,")
 print("[check]   hybrid nests dense+sparse under RRF and rescores the pool with ColBERT,")
 print("[check]   search_specs and ingest_pdfs both refuse a mismatched collection before")
 print("[check]   embedding, and a recreate and an incremental ingest alike prove the models")
-print("[check]   load before a chunk is at risk — OK")
+print("[check]   load before a chunk is at risk,")
+print("[check]   cloud --recreate-index probes BOTH models through a throwaway collection and")
+print("[check]   cleans it up, so an unserved model id aborts before the wipe — OK")

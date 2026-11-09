@@ -20,7 +20,7 @@ Full record, including what the numbers cannot show: **[RESULTS.md](RESULTS.md)*
 
 | | start (26 Sep) † | now (7 Nov) |
 |---|---|---|
-| Evidence surviving the 15-excerpt answer budget | 11/16 † | **12/16** |
+| Evidence surviving the `--answer --use-bm25` 15-excerpt budget | 11/16 † | **12/16** |
 | Hybrid recall@5 | 10/16 † | **12/16** |
 | Union across retrieval paths | 12/16 † | **12/16** |
 | Qdrant-side hybrid query (p50, 5,254 chunks) | not measured | **31 ms** at 200 candidates/leg — the default sends 100 and is unmeasured |
@@ -171,7 +171,7 @@ Query: "Explain the role of Mp1 in MEC"
 - **PDF Monitor**: `tools/monitor_deliver.py` polls Exa for new ETSI PDF releases and downloads them automatically.
 - **Exa Search**: `tools/exa_search.py` calls the Exa API directly (no third-party SDK) to locate official ETSI deliver PDFs.
 - **Rank Shaping**: `src/etsi_mec_agent/dedup.py` — `_stitch_parts()` merges contiguous parts of one page, `_dedup_docs()` applies the text fingerprint and the per-document cap. Stdlib-only, so `scripts/check_dedup_stitch.py` asserts on it without loading the ONNX embedders.
-- **Retrieval Eval**: `scripts/eval_rag.py` scores recall@k for both retrieval paths against golden questions, with a corpus evidence pre-check, and reports the rank inside the wider `--answer` evidence budget as an `aggregate` column.
+- **Retrieval Eval**: `scripts/eval_rag.py` scores recall@k for both retrieval paths against golden questions, with a corpus evidence pre-check, and reports the rank inside the wider `--answer --use-bm25` evidence budget as an `aggregate` column.
 - **Corpus Audit**: `scripts/audit_specs.py` hashes `data/specs/*.pdf`, reads each PDF's own title page, and reports manifest keys that do not name the document they point at, URLs it cannot verify, and spec numbers never fetched.
 - **Schema Migration**: `scripts/migrate_add_sparse.py` adds a named vector to an existing collection by copying points, because Qdrant 1.19 cannot add named vectors in place.
 - **LLM Answers**: any OpenAI-compatible endpoint via `LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY` — default
@@ -204,7 +204,7 @@ Query: "Explain the role of Mp1 in MEC"
 
 | Script | What it does | Writes to |
 |---|---|---|
-| `eval_rag.py` | recall@k for both retrieval paths over the golden questions, plus the `aggregate` column shaped like the `--answer` budget | Qdrant reads |
+| `eval_rag.py` | recall@k for both retrieval paths over the golden questions, plus the `aggregate` column shaped like the `--answer --use-bm25` budget | Qdrant reads |
 | `backfill_spec_identity.py` | `report` / `--apply` / `--verify`: stamps `spec_id`, `edition`, `pub_date`, `content_md5`, `is_current` from the covers — no re-embedding | Qdrant payloads |
 | `drop_no_signal_chunks.py` | deletes the chunks the old chunker wrote from ETSI page furniture alone (dry run by default, `--apply` deletes, re-scans to prove it) | Qdrant deletes |
 | `deduplicate_collection.py` | removes duplicate chunks in place by text fingerprint, electing one survivor per group | Qdrant deletes |
@@ -430,10 +430,12 @@ uv run python -m etsi_mec_agent.search "Summarize security requirements in MEC00
 uv run python scripts/eval_rag.py --top-k 5
 ```
 Prints the rank at which each golden question is answered under both retrieval paths, plus the
-`aggregate` column — the same hybrid path shaped like the `--answer` evidence budget (stitched
-parts, up to `--per-doc` excerpts per doc, read over `--answer-context`, defaults 2 and 15).
+`aggregate` column — the same hybrid path shaped like the `--answer --use-bm25` evidence budget
+(stitched parts, up to `--per-doc` excerpts per doc, read over `--answer-context`, defaults 2 and 15).
+Bare `--answer` takes the dense/ColBERT path instead, which this column does not measure.
 Recall is reported for the two baseline paths at `--top-k` and for the aggregate column over that
-budget.
+budget. The top-5 and aggregate columns are separate queries at different candidate pools (100 and
+180 per leg), so a rank in one is not a rank the other would print inside a single `--answer` run.
 A question flagged `EVIDENCE-MISSING` is bad golden data — its keyword does not occur in the
 expected document — and is excluded from the denominator, so recall reflects retrieval only.
 

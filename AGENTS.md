@@ -73,11 +73,13 @@ scripts/
   label_collection_identity.py # stamp the embedding identity onto a collection that predates the guard
   #                            # (metadata only, no re-embed); dry run by default, --apply writes,
   #                            # and --force is needed to overwrite a different identity claim
-  eval_rag.py               # golden-question recall@k, both paths + the --answer budget
+  eval_rag.py               # golden-question recall@k, both paths + the --answer --use-bm25 budget
   migrate_add_sparse.py     # copy points into a new collection that has 'sparse' (no re-embed);
   #                         # resolves the alias, refuses an existing --target rather than clobbering
   #                         # it, and refuses a source that records no embedding identity (a copy
-  #                         # inherits the SOURCE's claim, never the current provider's)
+  #                         # inherits the SOURCE's claim, never the current provider's), and refuses
+  #                         # a source whose stored vector widths differ from DENSE_DIM/COLBERT_DIM —
+  #                         # that mismatch would fail the first upsert with the target already created
   graph_visualize.py        # force-directed spec relationship graph
 
 data/
@@ -165,7 +167,7 @@ uv run python scripts/drop_no_signal_chunks.py --apply
 uv run python scripts/deduplicate_collection.py --dry-run
 uv run python scripts/deduplicate_collection.py
 
-# Golden-question retrieval eval (recall@k for both paths + the --answer budget)
+# Golden-question retrieval eval (recall@k for both paths + the --answer --use-bm25 budget)
 uv run python scripts/eval_rag.py --top-k 5
 
 # Spec identity: report, then write payloads, then check search_specs honours them

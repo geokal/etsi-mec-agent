@@ -5,9 +5,10 @@
 Exercises three retrieval paths from etsi_mec_agent.search:
   colbert   — dense prefetch + ColBERT MaxSim rescore (search_specs path 2)
   hybrid    — dense+sparse prefetch fused by RRF, rescored by ColBERT (_run_hybrid_retrieval)
-  aggregate — what --answer reads: the same hybrid path over the --answer-context / --per-doc
-              budget the CLI uses (defaults 15 / 2). This column is the LLM's evidence, not the
-              --top-k printed.
+  aggregate — what `--answer --use-bm25` reads: the same hybrid path over the --answer-context /
+              --per-doc budget the CLI uses (defaults 15 / 2). This column is the LLM's evidence,
+              not the --top-k printed. Bare `--answer` takes the dense/ColBERT path instead
+              (search.py gates the hybrid on use_bm25), which this column does not measure.
 
 All three stitch contiguous page parts before they dedup, and all three measure behind
 build_filter(), because that is what search_specs ships.
@@ -131,7 +132,7 @@ def hits_hybrid(client, q_dense, q_sparse, q_colbert, k):
 
 
 def hits_aggregate(client, q_dense, q_sparse, q_colbert, ctx=15, per_doc=2):
-    """What --answer sees: contiguous page parts stitched, up to per_doc excerpts per doc."""
+    """What --answer --use-bm25 reads: page parts stitched, up to per_doc excerpts per doc."""
     # search_specs' answer budget, mirrored: prefetch_limit = max(25, fetch_k * 3), then the
     # hybrid leg's max(that * 4, 100) (search.py:491,514). A flat 100 under-filled the pool for
     # any ctx above 8, so this column measured a narrower retrieval than --answer runs.

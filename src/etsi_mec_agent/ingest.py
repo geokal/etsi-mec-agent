@@ -326,6 +326,29 @@ def ingest_single_pdf(
 
 
 
+def _preflight_cloud_inference(provider) -> None:
+    """Prove both cloud models can infer before --recreate-index deletes anything.
+
+    The cloud batch methods only build models.Document; the cluster resolves the model on the first
+    upsert, which the wipe has already preceded. One point into a throwaway collection surfaces an
+    unserved model id while the real collection is still intact. Both models go into the same point
+    because either one being unavailable is enough to empty the collection for nothing.
+    """
+    probe = settings.qdrant_index + "__preflight"
+    client = get_qdrant_client()
+    ensure_collection(collection_name=probe)
+    try:
+        client.upsert(collection_name=probe, points=[PointStruct(
+            id=0,
+            vector={"dense": provider.embed_dense_batch(["preflight"])[0],
+                    "colbert": provider.embed_colbert_batch(["preflight"])[0],
+                    "sparse": _token_sparse("preflight")},
+            payload={},
+        )])
+    finally:
+        client.delete_collection(probe)
+
+
 def ingest_pdfs(
     sources: List[Path],
     recreate_index: bool = False,
@@ -347,8 +370,12 @@ def ingest_pdfs(
             # missing package or a failed model download used to surface inside the first batch's
             # except, by which point --recreate-index had already emptied the collection. One
             # throwaway embedding forces both constructions (get_embedders builds dense and
-            # ColBERT together); in cloud mode it returns a Document and touches no network.
-            get_provider().embed_dense_batch(["warm the embedders before recreating the collection"])
+            # ColBERT together). In cloud mode that call only builds a Document and proves nothing,
+            # so the probe below does the proving there.
+            provider = get_provider()
+            provider.embed_dense_batch(["warm the embedders before recreating the collection"])
+            if settings.embedding_mode == "cloud":
+                _preflight_cloud_inference(provider)
         ensure_collection(recreate=recreate_index)
     client = get_qdrant_client()
     if not dry_run:

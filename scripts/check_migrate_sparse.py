@@ -10,8 +10,9 @@ the payload stores only the body under "text". Reading the body alone — what t
 the fix — drops the cover-derived spec number from the sparse vector.
 
 It also drives the migration's main() end to end against a fake client: the copy must inherit the
-SOURCE's embedding identity (it re-embeds nothing), and a source that records no identity must
-abort instead of being stamped with whatever provider happens to be configured.
+SOURCE's embedding identity (it re-embeds nothing), a source that records no identity must abort
+instead of being stamped with whatever provider happens to be configured, and a source whose stored
+vector widths differ from the configured target must abort before that target is created.
 """
 import sys
 import types
@@ -65,20 +66,28 @@ assert tok_id("003") not in before.indices
 # A migration copies vectors it did not make, so stamping the current provider's identity would
 # label them with whatever EMBEDDING_MODE happens to be set — the exact lie the guard catches.
 class _FakeCollection:
-    """The identity a collection claims, plus the point count the migration verifies against."""
+    """The identity a collection claims, its stored vector widths, and its point count."""
 
-    def __init__(self, metadata):
-        """metadata is the claim; zero points means the copy loop has nothing to do."""
-        self.config = types.SimpleNamespace(metadata=metadata)
+    def __init__(self, metadata, dense_dim=None, colbert_dim=None):
+        """Zero points means the copy loop has nothing to do; dims default to the configured ones."""
+        self.config = types.SimpleNamespace(
+            metadata=metadata,
+            params=types.SimpleNamespace(vectors={
+                "dense": types.SimpleNamespace(
+                    size=settings.dense_dim if dense_dim is None else dense_dim),
+                "colbert": types.SimpleNamespace(
+                    size=settings.colbert_dim if colbert_dim is None else colbert_dim),
+            }),
+        )
         self.points_count = 0
 
 
 class _FakeMigrateClient:
     """Stands in for Qdrant: the aliased collection itself, empty, so nothing is scrolled."""
 
-    def __init__(self, metadata):
+    def __init__(self, metadata, **dims):
         """One empty source behind the alias, plus a record of how the switch happened."""
-        self.source = _FakeCollection(metadata)
+        self.source = _FakeCollection(metadata, **dims)
         self.aliases_moved = []
         self.deleted = []
 
@@ -107,9 +116,9 @@ class _FakeMigrateClient:
         self.deleted.append(name)
 
 
-def _migrate(metadata, *argv):
+def _migrate(metadata, *argv, **dims):
     """Run the migration's main() against a fake source; returns (client, created, SystemExit)."""
-    client = _FakeMigrateClient(metadata)
+    client = _FakeMigrateClient(metadata, **dims)
     created = []
     held = (migrate_add_sparse.get_qdrant_client, migrate_add_sparse.ensure_collection, sys.argv)
     migrate_add_sparse.get_qdrant_client = lambda: client
@@ -135,4 +144,18 @@ client, created, err = _migrate({}, "--target", "fresh_copy")
 assert err is not None and "label_collection_identity" in str(err), err
 assert created == [], "an unlabelled source must not be copied at all"
 
-print("check_migrate_sparse: OK (13 assertions)")
+# --- a dimension mismatch must abort BEFORE the target is created ---------------------------
+# ensure_collection declares the target from DENSE_DIM/COLBERT_DIM, but the vectors come from the
+# source. A mismatch fails the first upsert with the target already created, and the "already
+# exists" refusal above then blocks every retry under that name. The check reads the stored vector
+# params, not the identity claim: a claim can be wrong, the stored width is what the upsert hits.
+client, created, err = _migrate(made_by, "--target", "fresh_copy", dense_dim=settings.dense_dim + 1)
+assert err is not None and "dense" in str(err), err
+assert created == [], "a dense mismatch must abort before ensure_collection runs"
+
+client, created, err = _migrate(made_by, "--target", "fresh_copy",
+                               colbert_dim=settings.colbert_dim + 1)
+assert err is not None and "colbert" in str(err), err
+assert created == [], "a colbert mismatch must abort before ensure_collection runs"
+
+print("check_migrate_sparse: OK (17 assertions)")

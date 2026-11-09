@@ -81,6 +81,18 @@ def main():
             f"made the vectors about to be copied. Label it first — "
             f"`uv run python scripts/label_collection_identity.py --apply` with QDRANT_INDEX "
             f"pointed at '{source}' — then re-run.")
+    # The target is declared from DENSE_DIM/COLBERT_DIM but the vectors come from the source, so a
+    # mismatch fails the first upsert *after* the target exists — and the "already exists" refusal
+    # above then blocks every retry under that name. Read the stored params, not the identity claim:
+    # a claim can be wrong, the stored width is what the upsert actually hits.
+    for name, want, env in (("dense", settings.dense_dim, "DENSE_DIM"),
+                            ("colbert", settings.colbert_dim, "COLBERT_DIM")):
+        got = src_col.config.params.vectors[name].size
+        if got != want:
+            raise SystemExit(
+                f"ABORT: '{source}' stores {got}-d '{name}' vectors but '{target}' would be created "
+                f"{want}-d, so the copy would fail on its first upsert and leave the target behind. "
+                f"Set {env}={got} and re-run.")
     ensure_collection(collection_name=target, metadata=source_identity)
     src = src_col.points_count
 
